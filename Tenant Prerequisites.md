@@ -3,8 +3,8 @@
 > **Audience:** Partner technical engineer responsible for customer tenant preparation
 > **Purpose:** Definitive checklist of the **resources, licenses, and services that must already exist** in the customer's Microsoft 365 / Azure tenant before EasySOC onboarding begins
 > **Scope:** Prerequisites only — the "is the tenant ready?" gate.
-> - The step-by-step run procedure is in **[[docs/Partner Tenant Preparation Guide v10]]**.
-> - The agent's access rights, the data it touches, what leaves the tenant, and the egress allow-list are in **[[docs/Tenant Data Sovereignty and Access v1]]**.
+> - The step-by-step run procedure is in **[Partner Tenant Preparation Guide](./Partner%20Tenant%20Preparation%20Guide.md)**.
+> - The agent's access rights, the data it touches, what leaves the tenant, and the egress allow-list are in **[Tenant Data Sovereignty and Access](./Tenant%20Data%20Sovereignty%20and%20Access.md)**.
 > **Last updated:** 2026-06-17
 > **Supersedes:** Tenant Prerequisites v5 — corrects the ACR pull-token row in §8: `$AcrPullPassword` is **not** pre-filled in `deploy-aci.ps1`; it ships blank and the partner engineer must paste it into the PROVIDER section before deploying (the deploy script fails fast with `AcrPullPassword is required` otherwise).
 
@@ -135,7 +135,7 @@ These are the roles **you** must hold to run Phase B/C. They are a readiness gat
 | **Application Administrator** (or Global Administrator) in the customer Entra ID tenant | Create the app registration and **grant admin consent** | **Critical.** Contributor alone is not enough. Without this, the script still completes and writes the config file, but admin consent is silently skipped → the agent gets **403 on every Graph call** at runtime |
 | **Contributor** on the target resource group / subscription | Create the storage account, register providers, deploy the container, assign the Sentinel Reader role | Global Admin does not include Azure RBAC by default — ensure Contributor is also held |
 
-> The app registration (created by Phase B) requests **12 Microsoft Graph application permissions** plus the **Microsoft Sentinel Reader** RBAC role. You do not configure these by hand — the script does — but admin consent for them requires the roles above. The full permission list and rationale are in **[[docs/Tenant Data Sovereignty and Access v1]]**.
+> The app registration (created by Phase B) requests **12 Microsoft Graph application permissions** plus the **Microsoft Sentinel Reader** RBAC role. You do not configure these by hand — the script does — but admin consent for them requires the roles above. The full permission list and rationale are in **[Tenant Data Sovereignty and Access](./Tenant%20Data%20Sovereignty%20and%20Access.md)**.
 
 ---
 
@@ -174,4 +174,4 @@ Run through this before invoking `Prepare-Tenant.ps1`:
 | 13 | Custom-detection titles checked for embedded customer identifiers (see Data Sovereignty & Access doc) | ☐ |
 | 14 | Storage account **NOT** pre-created (script provisions it) | ☐ |
 
-When all rows are checked, proceed to **[[docs/Partner Tenant Preparation Guide v10]]** for the step-by-step preparation and deployment run.
+When all rows are checked, proceed to **[Partner Tenant Preparation Guide](./Partner%20Tenant%20Preparation%20Guide.md)** for the step-by-step preparation and deployment run.

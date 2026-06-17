@@ -3,8 +3,8 @@
 > **Audience:** Partner technical engineer, and the customer's security/compliance reviewer
 > **Purpose:** Single reference for **what the agent can access, what data leaves the tenant, and the egress it requires** — the access-rights and data-residency picture, separated from the readiness checklist and the run procedure.
 > **Companion docs:**
-> - Resources/licenses/services to stand up first → **[[docs/Tenant Prerequisites v5]]**
-> - Step-by-step run + deploy procedure → **[[docs/Partner Tenant Preparation Guide v9]]**
+> - Resources/licenses/services to stand up first → **[Tenant Prerequisites](./Tenant%20Prerequisites.md)**
+> - Step-by-step run + deploy procedure → **[Partner Tenant Preparation Guide](./Partner%20Tenant%20Preparation%20Guide.md)**
 > **Last updated:** 2026-06-17
 > **Supersedes:** consolidates the access/data-sovereignty material previously split across Tenant Prerequisites v4 (§9 egress, §10 custom-detection note) and Partner Tenant Preparation Guide v8 (§1.1–§1.5).
 

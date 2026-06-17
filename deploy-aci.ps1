@@ -22,6 +22,15 @@ $AcrLoginServer  = "easysoc.azurecr.io"
 $AcrPullUser     = "partner-poc"
 $AcrPullPassword = ""          # ACR pull token password
 
+# EasySOC control endpoint (licensing / prompt delivery / telemetry).
+# $BootstrapUrl + $BootstrapTlsVerify are constant across customers.
+# $BootstrapToken is the PER-TENANT license token EasySOC issues for THIS customer
+# (paste it per deployment, like $AcrPullPassword). Leave blank ONLY for local/dev
+# deploys with no control server -> license enforcement is then DISABLED (fail-open).
+$BootstrapUrl       = "https://api.easysoc.io"
+$BootstrapToken     = ""        # per-tenant license token (provided by EasySOC)
+$BootstrapTlsVerify = "true"    # "true" | "false" (dev only) | path to CA bundle
+
 $ImageTag        = "latest"
 $LogLevel        = "INFO"      # DEBUG for verbose diagnostics
 
@@ -78,9 +87,16 @@ if (-not $AnthropicApiKey)  { throw "AnthropicApiKey is required - set it in the
 if (-not $StorageAccount)   { throw "StorageAccount is required (config file)." }
 if (-not $ResourceGroup)    { throw "ResourceGroup is required (config file)." }
 
+# License enforcement: warn (don't block) if the per-tenant token is missing — the
+# container fail-opens when url/token are blank, so this would silently disable licensing.
+if (-not $BootstrapToken -or -not $BootstrapUrl) {
+    Write-Warning "BootstrapToken/BootstrapUrl not set (PROVIDER section) — LICENSE ENFORCEMENT WILL BE DISABLED for this deployment."
+}
+
 Write-Host "    Customer : $SocCustomerId"
 Write-Host "    Backend  : $SocCaseBackend"
 Write-Host "    RG       : $ResourceGroup ($Location)"
+Write-Host "    License  : $(if ($BootstrapToken -and $BootstrapUrl) { "enforced ($BootstrapUrl)" } else { 'DISABLED' })"
 
 # Ensure ACI provider is registered (no-op if already registered)
 Write-Host "==> Registering Microsoft.ContainerInstance provider ..."
@@ -131,8 +147,11 @@ az container create `
         XDR_DCR_ENDPOINT="$XdrDcrEndpoint" `
         XDR_DCR_RULE_ID="$XdrDcrRuleId" `
         ANTHROPIC_BASE_URL="$AnthropicBaseUrl" `
+        BOOTSTRAP_URL="$BootstrapUrl" `
+        BOOTSTRAP_TLS_VERIFY="$BootstrapTlsVerify" `
     --secure-environment-variables `
         ANTHROPIC_API_KEY="$AnthropicApiKey" `
+        BOOTSTRAP_TOKEN="$BootstrapToken" `
         MS_CLIENT_SECRET="$MsClientSecret" `
         MS_SENTINEL_WORKSPACE="$MsSentinelWorkspace" `
         TEAMS_WEBHOOK_URL="$TeamsWebhookUrl" `

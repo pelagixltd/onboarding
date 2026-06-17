@@ -3,8 +3,8 @@
 > **Audience:** Partner technical engineer
 > **Purpose:** The engineering run procedure — prepare a customer tenant and deploy the agent container using the two provided scripts (`Prepare-Tenant.ps1` + `deploy-aci.ps1`)
 > **Scope:** Procedure only. This guide assumes the tenant is already ready.
-> - Tenant readiness (resources/licenses/services + pre-flight checklist) → **[[docs/Tenant Prerequisites v6]]**
-> - What the agent can access, what leaves the tenant, app permissions, egress → **[[docs/Tenant Data Sovereignty and Access v1]]**
+> - Tenant readiness (resources/licenses/services + pre-flight checklist) → **[Tenant Prerequisites](./Tenant%20Prerequisites.md)**
+> - What the agent can access, what leaves the tenant, app permissions, egress → **[Tenant Data Sovereignty and Access](./Tenant%20Data%20Sovereignty%20and%20Access.md)**
 > **Last updated:** 2026-06-17
 > **Supersedes:** Partner Tenant Preparation Guide v9 — two corrections: (1) the ACR pull token `$AcrPullPassword` ships **blank** in `deploy-aci.ps1` and **must be pasted into the PROVIDER section by the engineer** before deploying (the script fails fast with `AcrPullPassword is required` otherwise) — the previous "pre-filled / no manual editing required" wording was wrong; (2) `-DryRun` now writes a **preview** config file (it no longer writes nothing).
 
@@ -12,7 +12,7 @@
 
 ## 0. Before You Start
 
-Confirm the tenant passes the **pre-flight readiness checklist** in [[docs/Tenant Prerequisites v6]] §9. The quick gate:
+Confirm the tenant passes the **pre-flight readiness checklist** in [Tenant Prerequisites](./Tenant%20Prerequisites.md) §9. The quick gate:
 
 | Item | Status |
 |---|---|
@@ -74,11 +74,11 @@ The Channel ID must be supplied in its **raw, decoded form** (the agent embeds i
 
 Correct format:
 ```
-19:f446bef4fc0a4b42bf02ba55d64cf8be@thread.tacv2
+19:aaaabbbbccccddddeeeeffff00001111@thread.tacv2
 ```
 
 To get this from the browser URL:
-1. Copy the segment between `/l/channel/` and the next `/`: `19%3Af4**********************8be%40thread.tacv2`
+1. Copy the segment between `/l/channel/` and the next `/`: `19%3Aaaaa**********************1111%40thread.tacv2`
 2. Decode it: replace `%3A` → `:` and `%40` → `@`
 3. The result must start with `19:` and end with `@thread.tacv2`
 
@@ -86,9 +86,9 @@ To get this from the browser URL:
 
 | Mistake | Example (wrong) | Correct |
 |---|---|---|
-| Pasting the URL-encoded form | `19%3Af446bef4fc...%40thread.tacv2` | `19:f446bef4fc...@thread.tacv2` |
-| Spurious `F` prefix (copied from a Teams desktop app URL) | `F19:f446bef4fc...@thread.tacv2` | `19:f446bef4fc...@thread.tacv2` |
-| Missing `2` suffix | `19:f446bef4fc...@thread.tacv` | `19:f446bef4fc...@thread.tacv2` |
+| Pasting the URL-encoded form | `19%3Aaaaabbbb...%40thread.tacv2` | `19:aaaabbbb...@thread.tacv2` |
+| Spurious `F` prefix (copied from a Teams desktop app URL) | `F19:aaaabbbb...@thread.tacv2` | `19:aaaabbbb...@thread.tacv2` |
+| Missing `2` suffix | `19:aaaabbbb...@thread.tacv` | `19:aaaabbbb...@thread.tacv2` |
 
 > **Quick sanity check:** the raw Channel ID must start with `19:` and end with `@thread.tacv2`. Any other prefix or suffix indicates a copy error.
 
