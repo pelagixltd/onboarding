@@ -1,12 +1,13 @@
-# EasySOC — Tenant Data Sovereignty & Access v1
+# EasySOC — Tenant Data Sovereignty & Access v2
 
 > **Audience:** Partner technical engineer, and the customer's security/compliance reviewer
 > **Purpose:** Single reference for **what the agent can access, what data leaves the tenant, and the egress it requires** — the access-rights and data-residency picture, separated from the readiness checklist and the run procedure.
 > **Companion docs:**
 > - Resources/licenses/services to stand up first → **[Tenant Prerequisites](./Tenant%20Prerequisites.md)**
 > - Step-by-step run + deploy procedure → **[Partner Tenant Preparation Guide](./Partner%20Tenant%20Preparation%20Guide.md)**
-> **Last updated:** 2026-06-17
-> **Supersedes:** consolidates the access/data-sovereignty material previously split across Tenant Prerequisites v4 (§9 egress, §10 custom-detection note) and Partner Tenant Preparation Guide v8 (§1.1–§1.5).
+> **Last updated:** 2026-08-16
+> **Supersedes:** Tenant Data Sovereignty & Access v1 — adds the **Azure OpenAI** inference backend (`-LlmBackend azure_openai`) alongside Anthropic/Foundry in §3 and §5.
+> **Prior:** v1 consolidated the access/data-sovereignty material previously split across Tenant Prerequisites v4 (§9 egress, §10 custom-detection note) and Partner Tenant Preparation Guide v8 (§1.1–§1.5).
 
 The only data that ever leaves the tenant goes to three destinations: the **inference endpoint** (LLM reasoning), the three **optional threat-intelligence APIs**, and the **EasySOC control endpoint** (licensing, prompt delivery, and operational telemetry / threat-intel). All are outbound-only HTTPS calls initiated by the container — no inbound ports are opened.
 
@@ -89,14 +90,14 @@ The inference endpoint is required; threat-intelligence APIs are optional and ca
 
 | Service | Endpoint | Purpose | Credential |
 |---|---|---|---|
-| **Inference endpoint** | Azure AI Foundry (`<resource>.services.ai.azure.com`) **or** `api.anthropic.com` | LLM inference — all investigation reasoning is done by Claude | `ANTHROPIC_API_KEY` (Foundry resource key, or EasySOC-provided key for the POC fallback) |
+| **Inference endpoint** | Azure AI Foundry (`<resource>.services.ai.azure.com`), `api.anthropic.com`, **or** Azure OpenAI (`<resource>.cognitiveservices.azure.com`) if `-LlmBackend azure_openai` | LLM inference — all investigation reasoning done by the configured model | `ANTHROPIC_API_KEY` (Foundry resource key, or EasySOC-provided key for the POC fallback) — **or** `AZURE_OPENAI_API_KEY` (Azure OpenAI resource key; no POC fallback for this backend) |
 | **VirusTotal** | `www.virustotal.com/api/v3` | IP reputation scoring and file hash lookup | `VIRUSTOTAL_API_KEY` (optional) |
 | **AbuseIPDB** | `api.abuseipdb.com/api/v2` | IP abuse confidence score (90-day reporting window) | `ABUSEIPDB_API_KEY` (optional) |
 | **IPInfo** | `api.ipinfo.io/lite` | IP geolocation and ASN data | `IPINFO_TOKEN` (optional) |
 | **EasySOC container registry** | `easysoc.azurecr.io` | Pull the agent container image at deploy time | ACR pull token (pre-filled in the deploy script by EasySOC) |
 | **EasySOC control endpoint** | EasySOC server (HTTPS) | License validation, runtime prompt delivery, operational telemetry (heartbeat + per-investigation metrics), and per-true-positive threat-intelligence submissions | Per-tenant license token (provided by EasySOC) |
 
-> **Data sovereignty target:** for a fully data-sovereign deployment, use an **Azure AI Foundry** Claude deployment in the customer's own tenant so inference traffic stays on the customer's Azure bill and within their boundary. The public `api.anthropic.com` (with an EasySOC-provided key) is a POC fallback only.
+> **Data sovereignty target:** for a fully data-sovereign deployment, use an **Azure AI Foundry** Claude deployment (default) **or an Azure OpenAI deployment** (`-LlmBackend azure_openai`) in the customer's own tenant so inference traffic stays on the customer's Azure bill and within their boundary. The public `api.anthropic.com` (with an EasySOC-provided key) is a POC fallback only available on the Anthropic backend.
 
 ---
 
@@ -125,7 +126,7 @@ The container makes **outbound HTTPS only** — no inbound ports are opened. If 
 
 | Destination | Required? | Purpose |
 |---|---|---|
-| `<resource>.services.ai.azure.com` (Foundry) **or** `api.anthropic.com` | **Yes** | LLM inference |
+| `<resource>.services.ai.azure.com` (Foundry), `api.anthropic.com`, **or** `<resource>.cognitiveservices.azure.com` (Azure OpenAI, if used) | **Yes** | LLM inference |
 | `easysoc.azurecr.io` | Yes | Container image pull |
 | EasySOC control endpoint (HTTPS) | Yes | License, prompts, telemetry, TI |
 | `graph.microsoft.com` | Yes | Defender incidents/alerts, Advanced Hunting, Entra, Teams |

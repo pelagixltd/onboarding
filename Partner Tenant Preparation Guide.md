@@ -1,12 +1,13 @@
-# EasySOC — Partner Tenant Preparation Guide v10
+# EasySOC — Partner Tenant Preparation Guide v11
 
 > **Audience:** Partner technical engineer
 > **Purpose:** The engineering run procedure — prepare a customer tenant and deploy the agent container using the two provided scripts (`Prepare-Tenant.ps1` + `deploy-aci.ps1`)
 > **Scope:** Procedure only. This guide assumes the tenant is already ready.
 > - Tenant readiness (resources/licenses/services + pre-flight checklist) → **[Tenant Prerequisites](./Tenant%20Prerequisites.md)**
 > - What the agent can access, what leaves the tenant, app permissions, egress → **[Tenant Data Sovereignty and Access](./Tenant%20Data%20Sovereignty%20and%20Access.md)**
-> **Last updated:** 2026-06-17
-> **Supersedes:** Partner Tenant Preparation Guide v9 — two corrections: (1) the ACR pull token `$AcrPullPassword` ships **blank** in `deploy-aci.ps1` and **must be pasted into the PROVIDER section by the engineer** before deploying (the script fails fast with `AcrPullPassword is required` otherwise) — the previous "pre-filled / no manual editing required" wording was wrong; (2) `-DryRun` now writes a **preview** config file (it no longer writes nothing).
+> **Last updated:** 2026-08-16
+> **Supersedes:** Partner Tenant Preparation Guide v10 — `Prepare-Tenant.ps1` now supports **Azure OpenAI** as an alternative inference backend to Anthropic/Foundry (`-LlmBackend azure_openai`, plus `-AzureOpenAiEndpoint`/`-AzureOpenAiApiKey`/`-AzureOpenAiDeployment`); see the updated parameter table in Step 3 and the new troubleshooting row.
+> **Prior:** v10 corrected the `$AcrPullPassword` ships-blank behavior and `-DryRun` preview-config behavior.
 
 ---
 
@@ -21,7 +22,7 @@ Confirm the tenant passes the **pre-flight readiness checklist** in [Tenant Prer
 | Microsoft Sentinel workspace deployed, analytics rules enabled | Partner confirms |
 | **Standard** Teams channel created (Shared Documents auto-provisioned; private/shared channels break report uploads) | Partner confirms |
 | Azure subscription available with Contributor access | Partner confirms |
-| (Recommended) Azure AI Foundry Claude deployment in the customer subscription | Partner confirms — record endpoint URL + key, or use the EasySOC POC key |
+| (Recommended) Azure AI Foundry Claude deployment in the customer subscription, **or** an Azure OpenAI deployment if using `-LlmBackend azure_openai` | Partner confirms — record endpoint URL + key (+ deployment name for Azure OpenAI), or use the EasySOC POC key (Anthropic backend only) |
 | Caller holds **Application Administrator** (or Global Administrator) — required for app registration + admin consent; Contributor alone is not sufficient | Partner confirms |
 | Caller can register resource providers (Contributor includes this) | Partner confirms |
 | Azure CLI installed | `az --version` |
@@ -96,7 +97,9 @@ To get this from the browser URL:
 
 ### Step 3 — Run the preparation script
 
-`Prepare-Tenant.ps1` does everything: it auto-discovers the subscription, resource group, Sentinel workspace, and any Azure AI Foundry inference endpoint (prompting you to choose only when more than one exists), creates the app registration with all 12 Graph permissions, grants admin consent, mints a client secret, provisions the storage account + Azure Files share, assigns the Sentinel Reader role, prompts for the Teams and (optional) enrichment values, and writes **`easysoc-deploy.config.ps1`**.
+`Prepare-Tenant.ps1` does everything: it auto-discovers the subscription, resource group, Sentinel workspace, and any Azure AI Foundry / Azure OpenAI inference endpoint (prompting you to choose only when more than one exists), creates the app registration with all 12 Graph permissions, grants admin consent, mints a client secret, provisions the storage account + Azure Files share, assigns the Sentinel Reader role, prompts for the Teams and (optional) enrichment values, and writes **`easysoc-deploy.config.ps1`**.
+
+By default it configures the **Anthropic/Foundry** inference path (§5 of Tenant Prerequisites). Pass `-LlmBackend azure_openai` to configure **Azure OpenAI** instead — see the parameter table below.
 
 **Simplest invocation — fully interactive:**
 
@@ -130,9 +133,12 @@ The script will prompt you for anything it cannot auto-discover (a subscription/
 | `-ResourceGroup` | Prompted (with a list of existing groups) if omitted; created automatically if it does not exist |
 | `-Location` | Defaults to the resource group's region; prompted only for a new group |
 | `-SentinelWorkspaceId` | Auto-discovered; prompted only if more than one workspace exists. Pass `none` to skip Sentinel (all Sentinel KQL then returns HTTP 403 at runtime) |
-| `-AnthropicBaseUrl` / `-AnthropicApiKey` | Auto-discovered from a Foundry resource, or prompted. Blank base URL = public `api.anthropic.com` |
+| `-LlmBackend` | `anthropic` (default) or `azure_openai`. Selects which of the two parameter groups below is used |
+| `-AnthropicBaseUrl` / `-AnthropicApiKey` | Used when `-LlmBackend anthropic` (default). Auto-discovered from a Foundry resource, or prompted. Blank base URL = public `api.anthropic.com` |
+| `-AzureOpenAiEndpoint` / `-AzureOpenAiApiKey` / `-AzureOpenAiDeployment` | Used when `-LlmBackend azure_openai`. Endpoint/key auto-discovered from a Foundry/Azure OpenAI resource if unambiguous, or prompted; deployment name (e.g. `gpt-5.4`) is always prompted if omitted — there is no auto-discovery for it |
 | `-TeamsWebhookUrl` / `-TeamsTeamId` / `-TeamsChannelId` | From Step 2; prompted (blank to disable Teams) if omitted |
 | `-VirusTotalApiKey` / `-AbuseIpDbApiKey` / `-IpInfoToken` | Optional enrichment keys; prompted (blank to disable) if omitted |
+| `-BootstrapUrl` / `-BootstrapToken` / `-BootstrapTlsVerify` | Advanced/rarely needed: overrides the EasySOC control-server endpoint that `deploy-aci.ps1`'s PROVIDER section otherwise supplies. Leave blank (the default) unless EasySOC has told you to set these explicitly for this deployment |
 | `-ConfigOutPath` | Where to write the config file (default `.\easysoc-deploy.config.ps1`) |
 | `-NonInteractive` | Never prompt — use only supplied/unambiguous values; fail otherwise. For pipelines |
 | `-DryRun` | Read-only: runs Sentinel/Foundry discovery, prints the plan, and makes **no** tenant changes. Writes a **preview** `easysoc-deploy.config.ps1` with the discovered values but placeholder `appId`/`objectId`/`secret` — not deployable as-is; re-run without `-DryRun` to provision real values |
@@ -172,7 +178,9 @@ $AcrPullPassword = "<ACR-PULL-TOKEN-PASSWORD-FROM-EASYSOC>"   # ships blank
 
 It is **blank as shipped**; if you leave it empty the script stops immediately with `AcrPullPassword is required (PROVIDER section).` and the container is never created. No other values in `deploy-aci.ps1` need editing — the image tag default is correct and everything customer-specific comes from the config file.
 
-> If no Azure AI Foundry endpoint was configured, `easysoc-deploy.config.ps1` leaves `$AnthropicApiKey` blank; `deploy-aci.ps1` then uses the EasySOC-provided POC key from its PROVIDER section. Confirm one of the two is present, or the deploy step will stop with "AnthropicApiKey is required".
+> **Anthropic backend (default):** if no Azure AI Foundry endpoint was configured, `easysoc-deploy.config.ps1` leaves `$AnthropicApiKey` blank; `deploy-aci.ps1` then uses the EasySOC-provided POC key from its PROVIDER section. Confirm one of the two is present, or the deploy step will stop with "AnthropicApiKey is required".
+>
+> **Azure OpenAI backend:** if you ran `Prepare-Tenant.ps1 -LlmBackend azure_openai`, there is **no POC fallback** — `$AzureOpenAiEndpoint` and `$AzureOpenAiApiKey` must both be present in `easysoc-deploy.config.ps1`, or the deploy step stops with "AzureOpenAiApiKey and AzureOpenAiEndpoint are required".
 
 ### Step 5 — Verify the storage account (optional)
 
@@ -248,6 +256,7 @@ The agent polls for new incidents periodically. You should see log lines such as
 | `AcrPullPassword is required (PROVIDER section).` when running `deploy-aci.ps1` | The ACR pull token was not pasted into `$AcrPullPassword` in the PROVIDER section — it ships blank | Open `deploy-aci.ps1`, set `$AcrPullPassword` to the ACR pull-token password EasySOC provided, then re-run |
 | `SubscriptionNotFound` during storage account creation (but `az group` commands work) | `Microsoft.Storage` resource provider not registered — storage-RP calls return this misleading error on clean subscriptions | The current script auto-registers it; if you hit this on a manual step, run `az provider register --namespace Microsoft.Storage --wait`, then re-run `Prepare-Tenant.ps1` |
 | `AnthropicApiKey is required` when running `deploy-aci.ps1` | The config file left `$AnthropicApiKey` blank and no POC fallback key is set | Set the Foundry key (re-run `Prepare-Tenant.ps1`) or have EasySOC fill the PROVIDER fallback key in `deploy-aci.ps1` |
+| `AzureOpenAiApiKey and AzureOpenAiEndpoint are required` when running `deploy-aci.ps1` | `easysoc-deploy.config.ps1` was generated with `-LlmBackend azure_openai` but the endpoint or key is blank — there is no POC fallback for this backend | Re-run `Prepare-Tenant.ps1 -LlmBackend azure_openai` and supply/confirm `-AzureOpenAiEndpoint`, `-AzureOpenAiApiKey`, `-AzureOpenAiDeployment` |
 | `Config file not found` when running `deploy-aci.ps1` | `easysoc-deploy.config.ps1` is not next to the deploy script | Place both files in the same folder, or pass `-ConfigFile <path>` |
 | `Teams reply poll failed — 400 Bad Request` in container logs | Channel ID format is incorrect — URL-encoded form or spurious `F` prefix | Fix the `$TeamsChannelId` value in `easysoc-deploy.config.ps1` — raw decoded format starting with `19:` and ending with `@thread.tacv2` (see Step 2). Re-run `deploy-aci.ps1` |
 | Webhook POST returns 200 but card never appears | Workflow created by an account that is not a member/owner of the Team — webhook issued but posts dropped | Add the workflow-creating account to the Team as Member or Owner, or have an existing member recreate the workflow and update `$TeamsWebhookUrl` |

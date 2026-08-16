@@ -1,12 +1,13 @@
-# EasySOC — Tenant Prerequisites v6
+# EasySOC — Tenant Prerequisites v7
 
 > **Audience:** Partner technical engineer responsible for customer tenant preparation
 > **Purpose:** Definitive checklist of the **resources, licenses, and services that must already exist** in the customer's Microsoft 365 / Azure tenant before EasySOC onboarding begins
 > **Scope:** Prerequisites only — the "is the tenant ready?" gate.
 > - The step-by-step run procedure is in **[Partner Tenant Preparation Guide](./Partner%20Tenant%20Preparation%20Guide.md)**.
 > - The agent's access rights, the data it touches, what leaves the tenant, and the egress allow-list are in **[Tenant Data Sovereignty and Access](./Tenant%20Data%20Sovereignty%20and%20Access.md)**.
-> **Last updated:** 2026-06-17
-> **Supersedes:** Tenant Prerequisites v5 — corrects the ACR pull-token row in §8: `$AcrPullPassword` is **not** pre-filled in `deploy-aci.ps1`; it ships blank and the partner engineer must paste it into the PROVIDER section before deploying (the deploy script fails fast with `AcrPullPassword is required` otherwise).
+> **Last updated:** 2026-08-16
+> **Supersedes:** Tenant Prerequisites v6 — adds §5a, an **Azure OpenAI** alternative to the Anthropic/Foundry inference backend (`-LlmBackend azure_openai`).
+> **Prior:** v6 corrected the ACR pull-token row in §8: `$AcrPullPassword` is **not** pre-filled in `deploy-aci.ps1`; it ships blank and the partner engineer must paste it into the PROVIDER section before deploying (the deploy script fails fast with `AcrPullPassword is required` otherwise).
 
 ---
 
@@ -105,6 +106,20 @@ All investigation reasoning is done by Claude. For a data-sovereign deployment t
 
 > **POC fallback:** the agent also runs against the public Anthropic API (`ANTHROPIC_BASE_URL` blank → `api.anthropic.com`, with an EasySOC-provided key). Use this only if a Foundry resource is not yet available; it routes inference outside the customer tenant and is not the data-sovereign target.
 
+### 5a. Alternative backend: Azure OpenAI
+
+`Prepare-Tenant.ps1 -LlmBackend azure_openai` configures the agent against an **Azure OpenAI** deployment instead of Anthropic/Foundry. Use this only if the customer's model access is via Azure OpenAI rather than Azure AI Foundry Claude models.
+
+**Prerequisites:**
+
+- [ ] **Azure OpenAI (or Azure AI Foundry) resource provisioned** in the customer subscription, with a chat-completion model deployed.
+- [ ] **Deployment name recorded** (e.g. `gpt-5.4`) — `Prepare-Tenant.ps1` always prompts for this; it is not auto-discovered.
+- [ ] **Endpoint URL and key recorded:**
+  - `AZURE_OPENAI_ENDPOINT` = the resource endpoint, e.g. `https://<resource>.cognitiveservices.azure.com`.
+  - `AZURE_OPENAI_API_KEY` = the resource key.
+
+> **No POC fallback for this backend.** Unlike the Anthropic path, there is no EasySOC-provided fallback key for Azure OpenAI — the endpoint, key, and deployment name must all be present in `easysoc-deploy.config.ps1` before `deploy-aci.ps1` will deploy.
+
 ---
 
 ## 6. Azure Subscription & Resource Providers
@@ -165,7 +180,7 @@ Run through this before invoking `Prepare-Tenant.ps1`:
 | 4 | Sentinel connectors enabled (`SecurityEvent`, `AzureActivity`, UEBA as needed) | ☐ |
 | 5 | Sentinel analytics rules enabled (incidents are being generated) | ☐ |
 | 6 | **Standard** Teams channel created; a Team member/owner available to create the webhook | ☐ |
-| 7 | Azure AI Foundry resource + Claude deployment; endpoint URL + key recorded; quota reviewed | ☐ |
+| 7 | Inference endpoint provisioned: Azure AI Foundry + Claude deployment (default), **or** Azure OpenAI deployment if using `-LlmBackend azure_openai` (§5a); endpoint URL + key (+ deployment name for Azure OpenAI) recorded; quota reviewed | ☐ |
 | 8 | Azure subscription with Contributor; subscription **ID** confirmed | ☐ |
 | 9 | Engineer holds **Application Administrator/Global Admin** (consent) **and** Contributor (Azure) | ☐ |
 | 10 | Azure CLI installed (`az --version`) | ☐ |

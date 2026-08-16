@@ -99,10 +99,10 @@ if ($_effectiveBackend -eq "azure_openai" -and (-not $AzureOpenAiApiKey -or -not
 if (-not $StorageAccount)   { throw "StorageAccount is required (config file)." }
 if (-not $ResourceGroup)    { throw "ResourceGroup is required (config file)." }
 
-# License enforcement: warn (don't block) if the per-tenant token is missing — the
+# License enforcement: warn (don't block) if the per-tenant token is missing - the
 # container fail-opens when url/token are blank, so this would silently disable licensing.
 if (-not $BootstrapToken -or -not $BootstrapUrl) {
-    Write-Warning "BootstrapToken/BootstrapUrl not set (PROVIDER section) — LICENSE ENFORCEMENT WILL BE DISABLED for this deployment."
+    Write-Warning "BootstrapToken/BootstrapUrl not set (PROVIDER section) - LICENSE ENFORCEMENT WILL BE DISABLED for this deployment."
 }
 
 Write-Host "    Customer : $SocCustomerId"
