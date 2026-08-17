@@ -13,8 +13,10 @@
          Graph application permissions the agent needs, grants admin consent, and creates
          a client secret.
       3. Provisions an Azure Storage account + Azure Files share for the audit volume.
-      4. Discovers the Sentinel / Log Analytics workspace and assigns the Microsoft
-         Sentinel Reader role (prompts only when more than one workspace exists).
+      4. Discovers the Sentinel / Log Analytics workspace, assigns the Microsoft
+         Sentinel Reader role, and retrieves the workspace's shared key so
+         deploy-aci.ps1 can enable ACI container-log integration on that same
+         workspace (prompts only when more than one workspace exists).
       5. Discovers an Azure AI Foundry inference endpoint (prompts to pick / confirm).
       6. Prompts for the values that cannot be auto-retrieved (Teams Workflows webhook +
          IDs, optional enrichment API keys).
@@ -58,6 +60,10 @@
 .PARAMETER SentinelWorkspaceId
     Log Analytics workspace customerId (GUID). Optional - auto-discovered; you are
     prompted only if more than one workspace exists. Pass "none" to skip Sentinel.
+    This same workspace's shared key is also retrieved automatically and written to
+    the config so deploy-aci.ps1 can enable ACI container-log integration (Azure
+    Portal's Log Analytics blade doesn't support the agent's container config -
+    secure env vars + a volume mount - so this must be set at deploy time via CLI).
 
 .PARAMETER LlmBackend
     LLM backend to configure: "anthropic" (default) or "azure_openai".
@@ -329,6 +335,11 @@ $dryNote
 # Sentinel
 `$MsSentinelWorkspace  = "$SentinelWorkspaceId"
 
+# ACI container-log integration (same workspace as Sentinel above; set at deploy
+# time only - Azure Portal doesn't support this for the agent's container config)
+`$LogAnalyticsWorkspaceId  = "$SentinelWorkspaceId"
+`$LogAnalyticsWorkspaceKey = "$LogAnalyticsWorkspaceKey"
+
 # Inference backend ("anthropic" or "azure_openai"; blank => anthropic)
 `$LlmBackend           = "$LlmBackend"
 # Anthropic backend (used when LlmBackend=anthropic; blank base URL => public api.anthropic.com)
@@ -557,6 +568,7 @@ if ($DryRun) {
 
 # Step 7: Sentinel workspace discovery + Reader role
 Write-Step "7/8" "Discovering Sentinel / Log Analytics workspace and assigning Sentinel Reader"
+$LogAnalyticsWorkspaceKey = ""
 if ($SentinelWorkspaceId -eq "none") {
     Write-Info "Sentinel explicitly skipped (-SentinelWorkspaceId none)."
     $SentinelWorkspaceId = ""
@@ -597,6 +609,29 @@ if ($SentinelWorkspaceId) {
                 Write-Ok "Sentinel Reader role assigned"
             }
         }
+    }
+
+    # Retrieve the workspace shared key so deploy-aci.ps1 can enable ACI
+    # container-log integration on this same workspace (Portal doesn't support
+    # this for the agent's container config - see .PARAMETER SentinelWorkspaceId).
+    # `get-shared-keys` (unlike most `show` commands) does not accept --ids, so
+    # resource group + workspace name are parsed out of the ARM resource ID.
+    if ($DryRun) {
+        Write-Info "DRY RUN: would retrieve the workspace shared key for ACI container-log integration."
+    } elseif ($workspaceArmId -and $workspaceArmId -match '/resourceGroups/([^/]+)/providers/Microsoft\.OperationalInsights/workspaces/([^/]+)$') {
+        $_laResourceGroup = $matches[1]
+        $_laWorkspaceName = $matches[2]
+        $LogAnalyticsWorkspaceKey = az monitor log-analytics workspace get-shared-keys `
+            --resource-group $_laResourceGroup --workspace-name $_laWorkspaceName `
+            --query "primarySharedKey" --output tsv
+        if ($LASTEXITCODE -ne 0 -or -not $LogAnalyticsWorkspaceKey) {
+            Write-Warning "Could not retrieve the workspace shared key. ACI container-log integration will be left disabled; add it to the config manually if needed."
+            $LogAnalyticsWorkspaceKey = ""
+        } else {
+            Write-Ok "Workspace shared key retrieved (enables ACI container-log integration)"
+        }
+    } elseif ($workspaceArmId) {
+        Write-Warning "Could not parse resource group/workspace name from '$workspaceArmId'. ACI container-log integration will be left disabled; add it to the config manually if needed."
     }
 }
 
@@ -704,6 +739,7 @@ Write-Host "  appId         : $($app.appId)"
 Write-Host "  objectId      : $($sp.id)"
 Write-Host "  Secret expiry : $SecretExpiry"
 if (-not $SentinelWorkspaceId) { Write-Host "  Sentinel      : (skipped - assign Reader role manually if added later)" -ForegroundColor Yellow }
+if ($SentinelWorkspaceId -and -not $LogAnalyticsWorkspaceKey -and -not $DryRun) { Write-Host "  ACI logging   : (shared key retrieval failed - add LogAnalyticsWorkspaceKey to config manually)" -ForegroundColor Yellow }
 if ($LlmBackend -eq "azure_openai") {
     if (-not $AzureOpenAiApiKey -or -not $AzureOpenAiEndpoint) {
         Write-Host "  Inference     : azure_openai (endpoint or key blank - provide before/at deploy time)" -ForegroundColor Yellow

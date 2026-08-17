@@ -51,6 +51,11 @@ $ContainerName       = "soc-agent"
 $SocCaseBackend      = "xdr"
 $MsSubscriptionId    = ""
 $MsSentinelWorkspace = ""
+# ACI container-log integration (Azure Portal doesn't support this for this container's
+# config - secure env vars + a volume mount - so it must be set here, at deploy time).
+# Populated by Prepare-Tenant.ps1 from the same workspace as $MsSentinelWorkspace above.
+$LogAnalyticsWorkspaceId  = ""
+$LogAnalyticsWorkspaceKey = ""
 # Anthropic backend (llm_backend: anthropic)
 $AnthropicBaseUrl    = ""
 $AnthropicApiKey     = ""
@@ -133,6 +138,17 @@ if ($LASTEXITCODE -eq 0 -and $existing) {
 $Image = "$AcrLoginServer/soc-agent:$ImageTag"
 Write-Host "==> Deploying $Image to ACI ($ResourceGroup / $ContainerName) ..."
 
+# ACI container-log integration is only settable at container-group creation (Portal
+# and CLI can't add it after the fact), and only when both a workspace ID and its
+# shared key are present - passing one without the other errors out.
+$LogAnalyticsArgs = @()
+if ($LogAnalyticsWorkspaceId -and $LogAnalyticsWorkspaceKey) {
+    $LogAnalyticsArgs = @("--log-analytics-workspace", $LogAnalyticsWorkspaceId, "--log-analytics-workspace-key", $LogAnalyticsWorkspaceKey)
+    Write-Host "    Log Analytics logging: enabled ($LogAnalyticsWorkspaceId)"
+} else {
+    Write-Host "    Log Analytics logging: disabled (no workspace configured)"
+}
+
 az container create `
     --resource-group $ResourceGroup `
     --name $ContainerName `
@@ -179,6 +195,7 @@ az container create `
     --azure-file-volume-share-name $FileShare `
     --azure-file-volume-mount-path /app/audit `
     --command-line "soc-agent --config /app/config/config.yaml --log-level $LogLevel" `
+    $LogAnalyticsArgs `
     --output none
 
 Write-Host ""

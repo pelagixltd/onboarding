@@ -1,13 +1,13 @@
-# EasySOC — Tenant Prerequisites v7
+# EasySOC — Tenant Prerequisites v8
 
 > **Audience:** Partner technical engineer responsible for customer tenant preparation
 > **Purpose:** Definitive checklist of the **resources, licenses, and services that must already exist** in the customer's Microsoft 365 / Azure tenant before EasySOC onboarding begins
 > **Scope:** Prerequisites only — the "is the tenant ready?" gate.
 > - The step-by-step run procedure is in **[Partner Tenant Preparation Guide](./Partner%20Tenant%20Preparation%20Guide.md)**.
 > - The agent's access rights, the data it touches, what leaves the tenant, and the egress allow-list are in **[Tenant Data Sovereignty and Access](./Tenant%20Data%20Sovereignty%20and%20Access.md)**.
-> **Last updated:** 2026-08-16
-> **Supersedes:** Tenant Prerequisites v6 — adds §5a, an **Azure OpenAI** alternative to the Anthropic/Foundry inference backend (`-LlmBackend azure_openai`).
-> **Prior:** v6 corrected the ACR pull-token row in §8: `$AcrPullPassword` is **not** pre-filled in `deploy-aci.ps1`; it ships blank and the partner engineer must paste it into the PROVIDER section before deploying (the deploy script fails fast with `AcrPullPassword is required` otherwise).
+> **Last updated:** 2026-08-17
+> **Supersedes:** Tenant Prerequisites v7 — notes in §7 that the Contributor role is also used to retrieve the Sentinel/Log Analytics workspace's shared key, which enables **ACI container-log integration** (see the Preparation Guide).
+> **Prior:** v7 added §5a, an Azure OpenAI alternative to the Anthropic/Foundry inference backend (`-LlmBackend azure_openai`).
 
 ---
 
@@ -91,7 +91,7 @@ The agent posts verdict cards via a **Workflows webhook** and **polls the same c
 
 ## 5. Azure AI Foundry — LLM Inference Endpoint (recommended target)
 
-All investigation reasoning is done by Claude. For a data-sovereign deployment the inference endpoint should be **Azure AI Foundry in the customer's own tenant**, so LLM traffic stays on the customer's Azure bill and within their Azure boundary. The agent routes through it via the Anthropic-compatible Foundry endpoint (`ANTHROPIC_BASE_URL` + `ANTHROPIC_API_KEY`).
+All investigation reasoning is done by the configured model. For a data-sovereign deployment the inference endpoint should be **Azure AI Foundry in the customer's own tenant**, so LLM traffic stays on the customer's Azure bill and within their Azure boundary. The agent routes through it via the Anthropic-compatible Foundry endpoint (`ANTHROPIC_BASE_URL` + `ANTHROPIC_API_KEY`).
 
 **Prerequisites:**
 
@@ -106,7 +106,9 @@ All investigation reasoning is done by Claude. For a data-sovereign deployment t
 
 > **POC fallback:** the agent also runs against the public Anthropic API (`ANTHROPIC_BASE_URL` blank → `api.anthropic.com`, with an EasySOC-provided key). Use this only if a Foundry resource is not yet available; it routes inference outside the customer tenant and is not the data-sovereign target.
 
-### 5a. Alternative backend: Azure OpenAI
+---
+
+## 5a. Alternative backend: Azure OpenAI
 
 `Prepare-Tenant.ps1 -LlmBackend azure_openai` configures the agent against an **Azure OpenAI** deployment instead of Anthropic/Foundry. Use this only if the customer's model access is via Azure OpenAI rather than Azure AI Foundry Claude models.
 
@@ -148,7 +150,7 @@ These are the roles **you** must hold to run Phase B/C. They are a readiness gat
 | Role | Needed for | Notes |
 |---|---|---|
 | **Application Administrator** (or Global Administrator) in the customer Entra ID tenant | Create the app registration and **grant admin consent** | **Critical.** Contributor alone is not enough. Without this, the script still completes and writes the config file, but admin consent is silently skipped → the agent gets **403 on every Graph call** at runtime |
-| **Contributor** on the target resource group / subscription | Create the storage account, register providers, deploy the container, assign the Sentinel Reader role | Global Admin does not include Azure RBAC by default — ensure Contributor is also held |
+| **Contributor** on the target resource group / subscription | Create the storage account, register providers, deploy the container, assign the Sentinel Reader role, and retrieve the Log Analytics workspace's shared key (enables ACI container-log integration — see the Preparation Guide) | Global Admin does not include Azure RBAC by default — ensure Contributor is also held |
 
 > The app registration (created by Phase B) requests **12 Microsoft Graph application permissions** plus the **Microsoft Sentinel Reader** RBAC role. You do not configure these by hand — the script does — but admin consent for them requires the roles above. The full permission list and rationale are in **[Tenant Data Sovereignty and Access](./Tenant%20Data%20Sovereignty%20and%20Access.md)**.
 

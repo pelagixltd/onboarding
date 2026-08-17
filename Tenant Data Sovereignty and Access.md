@@ -1,13 +1,13 @@
-# EasySOC — Tenant Data Sovereignty & Access v2
+# EasySOC — Tenant Data Sovereignty & Access v3
 
 > **Audience:** Partner technical engineer, and the customer's security/compliance reviewer
 > **Purpose:** Single reference for **what the agent can access, what data leaves the tenant, and the egress it requires** — the access-rights and data-residency picture, separated from the readiness checklist and the run procedure.
 > **Companion docs:**
 > - Resources/licenses/services to stand up first → **[Tenant Prerequisites](./Tenant%20Prerequisites.md)**
 > - Step-by-step run + deploy procedure → **[Partner Tenant Preparation Guide](./Partner%20Tenant%20Preparation%20Guide.md)**
-> **Last updated:** 2026-08-16
-> **Supersedes:** Tenant Data Sovereignty & Access v1 — adds the **Azure OpenAI** inference backend (`-LlmBackend azure_openai`) alongside Anthropic/Foundry in §3 and §5.
-> **Prior:** v1 consolidated the access/data-sovereignty material previously split across Tenant Prerequisites v4 (§9 egress, §10 custom-detection note) and Partner Tenant Preparation Guide v8 (§1.1–§1.5).
+> **Last updated:** 2026-08-17
+> **Supersedes:** Tenant Data Sovereignty & Access v2 — adds the Log Analytics workspace shared key to §2 (used only to enable **ACI container-log integration**; retrieved by the partner engineer's own credentials, never transmitted to EasySOC) and a §4 note that agent stdout/stderr can now optionally flow to the customer's own Log Analytics workspace.
+> **Prior:** v2 added the Azure OpenAI inference backend (§3, §5) alongside Anthropic/Foundry.
 
 The only data that ever leaves the tenant goes to three destinations: the **inference endpoint** (LLM reasoning), the three **optional threat-intelligence APIs**, and the **EasySOC control endpoint** (licensing, prompt delivery, and operational telemetry / threat-intel). All are outbound-only HTTPS calls initiated by the container — no inbound ports are opened.
 
@@ -60,6 +60,7 @@ The app registration created by `Prepare-Tenant.ps1` requests the following, all
 | Teams channel messages | Microsoft Teams | Graph API | Reads channel message replies to detect customer responses to information requests |
 | Log Analytics workspace | Microsoft Sentinel | Log Analytics REST API (`api.loganalytics.io`) | Executes KQL queries for Sentinel-native tables (SigninLogs, SecurityEvent, AzureActivity, UEBA) |
 | Azure Files share | Azure Storage | Storage account key | Persists audit JSONL logs and customer environment facts across container restarts |
+| Log Analytics workspace (same one, deploy-time only) | Azure Container Instances | Workspace shared key, passed to `az container create --log-analytics-workspace-key` | **Not** an agent access right — used only by `deploy-aci.ps1`, at container-group creation, to turn on ACI's built-in diagnostic pipe so `soc-agent`'s stdout/stderr lands in `ContainerInstanceLog_CL` in the customer's own workspace. The key is retrieved by the partner engineer's own `az` session in `Prepare-Tenant.ps1` (their Contributor credentials, not the agent's service principal) and never transmitted to EasySOC. See the Preparation Guide for why the Azure Portal can't configure this |
 
 ### 2.1 Tables Used in Investigations
 
@@ -111,6 +112,8 @@ The EasySOC control endpoint receives only operational and attacker-focused meta
 - **Threat-intelligence submission (true-positive incidents only)** — one record per confirmed true positive containing: MITRE technique IDs, kill-chain stage, the names of the evidence sources used (generic table/query labels, not their contents), and **attacker-controlled indicators only** — external/public IPs, domains, URLs, file hashes, and CVEs. Customer device hostnames, internal IPs, and user email/UPN identities are deterministically excluded.
 
 These submissions are best-effort and never block or alter an investigation.
+
+> **Container logs (optional, in-tenant only):** if a Log Analytics workspace shared key was retrieved during preparation (see §2), the agent's stdout/stderr also lands in `ContainerInstanceLog_CL` in the **customer's own** workspace via ACI's built-in diagnostic integration — this is a durable, queryable copy of the same log stream `az container logs` already shows, staying entirely within the customer's tenant/subscription. It is not sent to EasySOC and is not a new egress path.
 
 ### 4.1 ⚠️ Custom Detection Names — the one egress to check at preparation time
 

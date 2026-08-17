@@ -1,13 +1,13 @@
-# EasySOC — Partner Tenant Preparation Guide v11
+# EasySOC — Partner Tenant Preparation Guide v12
 
 > **Audience:** Partner technical engineer
 > **Purpose:** The engineering run procedure — prepare a customer tenant and deploy the agent container using the two provided scripts (`Prepare-Tenant.ps1` + `deploy-aci.ps1`)
 > **Scope:** Procedure only. This guide assumes the tenant is already ready.
 > - Tenant readiness (resources/licenses/services + pre-flight checklist) → **[Tenant Prerequisites](./Tenant%20Prerequisites.md)**
 > - What the agent can access, what leaves the tenant, app permissions, egress → **[Tenant Data Sovereignty and Access](./Tenant%20Data%20Sovereignty%20and%20Access.md)**
-> **Last updated:** 2026-08-16
-> **Supersedes:** Partner Tenant Preparation Guide v10 — `Prepare-Tenant.ps1` now supports **Azure OpenAI** as an alternative inference backend to Anthropic/Foundry (`-LlmBackend azure_openai`, plus `-AzureOpenAiEndpoint`/`-AzureOpenAiApiKey`/`-AzureOpenAiDeployment`); see the updated parameter table in Step 3 and the new troubleshooting row.
-> **Prior:** v10 corrected the `$AcrPullPassword` ships-blank behavior and `-DryRun` preview-config behavior.
+> **Last updated:** 2026-08-17
+> **Supersedes:** Partner Tenant Preparation Guide v11 — `Prepare-Tenant.ps1` now also retrieves the Sentinel/Log Analytics workspace's shared key and writes it to `easysoc-deploy.config.ps1`, so `deploy-aci.ps1` can enable **ACI container-log integration** (`--log-analytics-workspace`/`--log-analytics-workspace-key` on `az container create`) — the only way to get logs into Log Analytics for this container group, since the Azure Portal's Log Analytics blade refuses it (see the new note after Step 3 and the new troubleshooting row).
+> **Prior:** v11 added the Azure OpenAI backend and documented the Bootstrap-override parameters.
 
 ---
 
@@ -97,7 +97,7 @@ To get this from the browser URL:
 
 ### Step 3 — Run the preparation script
 
-`Prepare-Tenant.ps1` does everything: it auto-discovers the subscription, resource group, Sentinel workspace, and any Azure AI Foundry / Azure OpenAI inference endpoint (prompting you to choose only when more than one exists), creates the app registration with all 12 Graph permissions, grants admin consent, mints a client secret, provisions the storage account + Azure Files share, assigns the Sentinel Reader role, prompts for the Teams and (optional) enrichment values, and writes **`easysoc-deploy.config.ps1`**.
+`Prepare-Tenant.ps1` does everything: it auto-discovers the subscription, resource group, Sentinel workspace, and any Azure AI Foundry / Azure OpenAI inference endpoint (prompting you to choose only when more than one exists), creates the app registration with all 12 Graph permissions, grants admin consent, mints a client secret, provisions the storage account + Azure Files share, assigns the Sentinel Reader role, retrieves that workspace's shared key (for ACI container-log integration — see the note below), prompts for the Teams and (optional) enrichment values, and writes **`easysoc-deploy.config.ps1`**.
 
 By default it configures the **Anthropic/Foundry** inference path (§5 of Tenant Prerequisites). Pass `-LlmBackend azure_openai` to configure **Azure OpenAI** instead — see the parameter table below.
 
@@ -160,6 +160,8 @@ az role assignment create `
 
 > **Two different workspace GUIDs:** the `customerId` is used for Log Analytics queries; the role assignment requires the **ARM resource ID** (a path starting with `/subscriptions/...`). The command above resolves the ARM ID from the `customerId` for you.
 
+> **ACI container-log integration:** the script also retrieves the same workspace's shared key and writes it to `easysoc-deploy.config.ps1` as `LogAnalyticsWorkspaceId`/`LogAnalyticsWorkspaceKey`. `deploy-aci.ps1` (Step 6) passes these to `az container create --log-analytics-workspace`/`--log-analytics-workspace-key` — **the only way** to get `soc-agent`'s logs into Log Analytics. The Azure Portal's own Log Analytics blade refuses to configure this for the container group (it uses secure environment variables plus an Azure Files volume mount, which the Portal wizard treats as "advanced configuration" and won't touch), and the integration can only be set at container-group *creation*, never added to a running group afterward. If the shared key can't be retrieved, the script warns and leaves both blank — the deployment still succeeds, just without this logging path; fall back to `az container logs` (Step 8) or re-run Step 3 once the workspace issue is resolved and redeploy.
+
 ---
 
 ## 2. Container Deployment — Step by Step
@@ -200,7 +202,7 @@ The script will:
 2. Register `Microsoft.ContainerInstance` (no-op if already registered)
 3. Fetch the storage account key
 4. Delete the existing container instance if present (ACI does not support in-place updates)
-5. Create a new container instance with all environment variables and the Azure Files volume mounted at `/app/audit`
+5. Create a new container instance with all environment variables and the Azure Files volume mounted at `/app/audit`, plus Log Analytics logging enabled if a workspace key was retrieved in Step 3 (the console output shows `Log Analytics logging: enabled` or `disabled`)
 6. Wait 10 seconds and print startup logs
 
 ### Step 7 — Confirm the container is running
@@ -246,6 +248,7 @@ The agent polls for new incidents periodically. You should see log lines such as
 | Container running | `az container show -g rg-easysoc-poc -n soc-agent --query "containers[0].instanceView.currentState.state"` | `"Running"` |
 | Agent polls successfully | `az container logs -g rg-easysoc-poc -n soc-agent` | `poll:` log lines present, no auth errors |
 | Teams card posted | Trigger a test Defender incident | Verdict card appears in the configured Teams channel within ~2 minutes of incident creation |
+| ACI logs reaching Log Analytics (skip if `LogAnalyticsWorkspaceKey` was blank) | `az monitor log-analytics query -w <WORKSPACE-GUID> --analytics-query "ContainerInstanceLog_CL | take 5"` | Rows returned a few minutes after the container starts |
 
 ---
 
@@ -266,3 +269,5 @@ The agent polls for new incidents periodically. You should see log lines such as
 | `HTTP 400` from Sentinel — `could not be resolved` | Table does not exist in the workspace (e.g. connector not enabled) | Enable the relevant data connector in Sentinel |
 | Container exits immediately | Missing required environment variable | Check logs for `KeyError`/`ValueError`; verify the config file has all required values |
 | No incidents polled | No active incidents in Defender XDR | Create a test incident or wait for a real alert to trigger |
+| Azure Portal says "This container instance uses advanced configuration options that are not currently supported for Log Analytics workspace integration via the Portal" | Expected — `soc-agent` uses secure environment variables + an Azure Files volume mount, which the Portal's Log Analytics wizard doesn't support for any container group | Not an error. Log Analytics logging is already wired via CLI in `deploy-aci.ps1` (Step 6) — check the deploy output for `Log Analytics logging: enabled`, or query `ContainerInstanceLog_CL` in the workspace to confirm. No Portal action needed or possible |
+| `LogAnalyticsWorkspaceKey` blank / "Log Analytics logging: disabled" at deploy time | `Prepare-Tenant.ps1` could not retrieve the workspace shared key (permissions, or `-SentinelWorkspaceId none`) | Re-run `Prepare-Tenant.ps1` with a valid Sentinel/Log Analytics workspace selected, then redeploy — ACI logging can only be enabled at container-group creation, so a redeploy is required either way |
