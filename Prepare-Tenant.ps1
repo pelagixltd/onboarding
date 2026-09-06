@@ -9,9 +9,15 @@
 
       1. Verifies Azure CLI auth and selects the subscription (auto-detected; prompts
          only when more than one exists).
-      2. Creates an Entra ID app registration + service principal with the 12 Microsoft
+      2. Creates an Entra ID app registration + service principal with the Microsoft
          Graph application permissions the agent needs, grants admin consent, and creates
-         a client secret.
+         a client secret. The exact permission set depends on -CaseBackend/-TeamsMode
+         (see those parameters) -- least-privilege: a tenant with no Defender XDR/M365
+         has nothing behind SecurityAlert.*/SecurityIncident.*/ThreatHunting.Read.All, and
+         a cross-tenant Teams deployment (webhook-only; see -TeamsMode) has nothing behind
+         ChannelMessage.Read.All either -- it's requested only when it's actually usable,
+         not unconditionally. (Report delivery needs no Graph permission at all, in either
+         Teams mode -- see -TeamsMode's doc comment.)
       3. Provisions an Azure Storage account + Azure Files share for the audit volume.
       4. Discovers the Sentinel / Log Analytics workspace, assigns the Microsoft
          Sentinel Reader role, and retrieves the workspace's shared key so
@@ -65,6 +71,54 @@
     Portal's Log Analytics blade doesn't support the agent's container config -
     secure env vars + a volume mount - so this must be set at deploy time via CLI).
 
+.PARAMETER CaseBackend
+    Which CaseBackend the agent will use: "xdr" (default -- Defender XDR incident via
+    Graph Security API), "sentinel" (Microsoft Sentinel incident via KQL read + ARM REST
+    write -- for a tenant with Sentinel but no Defender XDR/M365 license, where
+    /security/incidents is permanently empty), or "sharepoint" (SharePoint List case
+    tracking, still backed by the underlying Defender XDR incident).
+    Controls which Graph Security API permissions get requested: "sentinel" excludes
+    SecurityAlert.*/SecurityIncident.*/ThreatHunting.Read.All entirely (nothing in the
+    tenant to grant them against); "xdr"/"sharepoint" both need them. Also determines the
+    $SocCaseBackend value written to the generated config -- Sentinel-specific fields
+    (resource_group/workspace_name/service_principal_object_id) are always populated
+    when a Sentinel workspace is discovered, regardless of this parameter, so switching
+    an already-prepared tenant to case_backend: sentinel later needs no re-run.
+
+.PARAMETER TenantSku
+    Which Microsoft licensing/telemetry mix this tenant actually has, for SIEM query
+    routing (agent/internal/siem/router.go): "business_premium" (default -- endpoint +
+    identity telemetry via Defender XDR Advanced Hunting, no Sentinel-only query types
+    available), "mde_sentinel" (Defender XDR for endpoint, Sentinel for identity
+    sign-in types), or "sentinel_only" (everything routed to Sentinel -- for a tenant
+    with Sentinel but no Defender XDR/M365 unified telemetry, i.e. normally paired with
+    -CaseBackend sentinel). If omitted, defaults to "sentinel_only" when
+    -CaseBackend is "sentinel" (nothing else it could sensibly be) and
+    "business_premium" otherwise -- override explicitly for a "mde_sentinel" tenant,
+    since that can't be inferred from -CaseBackend alone.
+
+.PARAMETER TeamsMode
+    How Teams output is configured: "full" (default -- posting + reply-polling, plus
+    report delivery), "webhook_only" (posting + report delivery, no reply-polling --
+    works cross-tenant with zero extra Graph permissions, since poster.go's webhook
+    POST is unauthenticated; use this when the only Teams access available is in a
+    different Entra tenant than this app registration, where reply-polling would
+    silently never work -- see Implementation/Cross-Tenant Teams Posting Failure --
+    Diagnosis v2 in the project vault), or "none" (no Teams at all). Only "full"
+    requests ChannelMessage.Read.All (reply polling), which requires the Team to live
+    in this same tenant to ever work, so "webhook_only"/"none" skip requesting it and
+    skip prompting for TeamsTeamId/TeamsChannelId (left blank -- they're only used for
+    reply-polling, never for report delivery).
+
+    Report delivery (the investigation report HTML) needs no Graph permission at all,
+    in either "full" or "webhook_only" mode: it rides as an extra field in the same
+    webhook POST as the notification card, and the customer's own Power Automate flow
+    (already authorized in its own tenant, since a member of that tenant built it)
+    writes it to SharePoint and posts the link back as a follow-up message. This is
+    why it works regardless of which tenant the Team lives in -- see the Diagnosis v2
+    doc referenced above for the full history of why this replaced a Graph-based
+    upload that could never work cross-tenant.
+
 .PARAMETER LlmBackend
     LLM backend to configure: "anthropic" (default) or "azure_openai".
     Determines how the discovered Foundry resource endpoint is written to the config.
@@ -116,6 +170,15 @@
     blank, these are omitted from the config file entirely so that default applies
     unchanged.
 
+.PARAMETER AcrPullPassword
+    Optional - the ACR pull-token password deploy-aci.ps1 needs to pull the soc-agent
+    image. Constant across customers (EasySOC-issued), not a per-tenant secret, but
+    written into THIS tenant's easysoc-deploy.config.ps1 when supplied so deploy-aci.ps1
+    never needs its own PROVIDER section edited -- that script is synced verbatim to the
+    public partner onboarding repo, so it must never hold a real secret. Prompted like
+    the other optional values (blank = deploy-aci.ps1 prompts for it interactively at
+    deploy time instead, unless run with -NonInteractive there too).
+
 .PARAMETER ConfigOutPath
     Where to write the deploy config. Default: .\easysoc-deploy.config.ps1.
 
@@ -138,6 +201,12 @@
         -SubscriptionId "xxxx..." -ResourceGroup "rg-easysoc" -Location "eastus" `
         -SentinelWorkspaceId "xxxx..." -TeamsWebhookUrl "https://..." `
         -TeamsTeamId "xxxx..." -TeamsChannelId "19:...@thread.tacv2" -NonInteractive
+
+.EXAMPLE
+    # Sentinel-only tenant (no Defender XDR/M365), Teams only reachable in a
+    # different Entra tenant -- excludes the Security API + Teams-polling/upload
+    # Graph permissions entirely, and leaves team_id/channel_id blank:
+    .\Prepare-Tenant.ps1 -CustomerId "contoso" -CaseBackend "sentinel" -TeamsMode "webhook_only"
 #>
 
 [CmdletBinding(SupportsShouldProcess)]
@@ -161,6 +230,16 @@ param(
     [int]$SecretExpiryYears = 1,
 
     [string]$SentinelWorkspaceId  = "",
+
+    [ValidateSet("xdr", "sentinel", "sharepoint")]
+    [string]$CaseBackend = "xdr",
+
+    [ValidateSet("", "business_premium", "mde_sentinel", "sentinel_only")]
+    [string]$TenantSku = "",
+
+    [ValidateSet("full", "webhook_only", "none")]
+    [string]$TeamsMode = "full",
+
     [string]$LlmBackend           = "",      # "anthropic" (default) | "azure_openai"
     [string]$AnthropicBaseUrl     = "",
     [string]$AnthropicApiKey      = "",
@@ -180,6 +259,10 @@ param(
     [string]$BootstrapToken      = "",
     [string]$BootstrapTlsVerify  = "",
 
+    # Optional - see .PARAMETER AcrPullPassword above. Never written anywhere but this
+    # tenant's own gitignored config file.
+    [string]$AcrPullPassword     = "",
+
     [string]$ConfigOutPath = ".\easysoc-deploy.config.ps1",
 
     [switch]$NonInteractive,
@@ -192,26 +275,61 @@ Set-StrictMode -Version Latest
 $AppName    = "AgenticSOC-$CustomerId"
 $GraphAppId = "00000003-0000-0000-c000-000000000000"
 
+# Default TenantSku from CaseBackend when not explicitly set -- "sentinel_only" is the
+# only sensible SIEM routing for a -CaseBackend sentinel tenant (no Defender XDR/M365
+# telemetry exists there at all); everything else defaults to "business_premium".
+# "mde_sentinel" must always be passed explicitly -- it can't be inferred from
+# -CaseBackend alone. See .PARAMETER TenantSku.
+if (-not $TenantSku) {
+    $TenantSku = if ($CaseBackend -eq "sentinel") { "sentinel_only" } else { "business_premium" }
+}
+
 # Microsoft Graph application permissions (all type Application; no user delegation).
-# This is the assessed minimal set for the XDR-native deployment (Tenant Prerequisites v3).
-# NOTE: the previously requested *separate* SharePoint Online Sites.ReadWrite.All
-# (resource 00000003-0000-0ff1-ce00-...) is intentionally NOT requested - it was a
-# leftover from the retired SP-Lists native-comments REST path. Report uploads use the
-# Graph Sites.ReadWrite.All below against the Teams channel's Shared Documents drive.
-$RequiredGraphPermissions = @(
-    "SecurityAlert.Read.All",        # Defender XDR + M365 security alerts (read)
-    "SecurityAlert.ReadWrite.All",   # write alert status/comments
-    "SecurityIncident.Read.All",     # read XDR incidents
-    "SecurityIncident.ReadWrite.All",# write comments/tags/classification to XDR incidents
-    "ThreatHunting.Read.All",        # Advanced Hunting API (Device* tables)
+# Built conditionally on -CaseBackend/-TeamsMode rather than one fixed list -- a tenant
+# with no Defender XDR/M365 has nothing behind the Security API scopes, and a
+# cross-tenant Teams deployment (-TeamsMode webhook_only, see that parameter's doc
+# comment) has nothing behind the Teams-polling scope; requesting permissions an
+# admin-consent screen shows but the deployment can never use is a real trust cost for
+# exactly the privacy-conscious customer profile the sentinel/webhook_only path
+# targets, not just clutter.
+# NOTE: SharePoint/Graph Sites.ReadWrite.All is intentionally NOT requested at all
+# (neither the legacy SharePoint Online resource 00000003-0000-0ff1-ce00-..., a leftover
+# from the retired SP-Lists native-comments REST path, nor the Graph one previously
+# requested here for report uploads against the Team's Shared Documents drive). Report
+# delivery no longer calls Graph -- it rides in the same webhook POST as the
+# notification card, and the customer's own Power Automate flow (already authorized in
+# its own tenant) does the SharePoint write. See -TeamsMode's doc comment and
+# Implementation/Cross-Tenant Teams Posting Failure -- Diagnosis v2 in the project vault.
+$RequiredGraphPermissions = [System.Collections.Generic.List[string]]::new()
+$RequiredGraphPermissions.AddRange([string[]]@(
     "IdentityRiskEvent.Read.All",    # Entra risky sign-in events
     "AuditLog.Read.All",             # sign-in logs for identity analysis
     "User.Read.All",                 # user profile details for context resolver
     "Directory.Read.All",            # group membership, role assignments, CA policies
-    "GroupMember.Read.All",          # group membership resolution
-    "ChannelMessage.Read.All",       # read Teams channel messages for feedback loop
-    "Sites.ReadWrite.All"            # upload investigation report HTML to Teams Shared Documents
-)
+    "GroupMember.Read.All"           # group membership resolution
+))
+if ($CaseBackend -ne "sentinel") {
+    # xdr and sharepoint both read/write the underlying Defender XDR incident via
+    # Graph's Security API (sharepointbackend.go resolves/writes /security/incidents/{id}
+    # too, not just xdrbackend.go) and both can use Advanced Hunting for SIEM telemetry --
+    # sentinel needs none of this, it never calls graph.microsoft.com/.../security/*.
+    $RequiredGraphPermissions.AddRange([string[]]@(
+        "SecurityAlert.Read.All",        # Defender XDR + M365 security alerts (read)
+        "SecurityAlert.ReadWrite.All",   # write alert status/comments
+        "SecurityIncident.Read.All",     # read XDR incidents
+        "SecurityIncident.ReadWrite.All",# write comments/tags/classification to XDR incidents
+        "ThreatHunting.Read.All"         # Advanced Hunting API (Device* tables)
+    ))
+}
+if ($TeamsMode -eq "full") {
+    # Requires the Team to live in THIS app registration's own tenant to ever work
+    # (poller.go's delta query) -- pointless to request for webhook_only/none, where
+    # team_id is left blank anyway. (No permission is requested for report delivery --
+    # it needs none in any TeamsMode; see the doc comment above.)
+    $RequiredGraphPermissions.AddRange([string[]]@(
+        "ChannelMessage.Read.All"        # read Teams channel messages for feedback loop
+    ))
+}
 
 # ---------------------------------------------------------------------------
 # helpers
@@ -304,6 +422,17 @@ function Write-DeployConfig {
         "# PROVIDER section default is used instead)`n" + ($bootstrapLines -join "`n")
     } else { "" }
 
+    # ACR pull-token password (optional). Omitted entirely when blank, same reasoning as
+    # bootstrapLines above -- deploy-aci.ps1's own PROVIDER section stays blank either way,
+    # since that script is synced verbatim to the public partner onboarding repo and must
+    # never hold a real secret; this is the file it's meant to come from instead.
+    $acrLines = [System.Collections.Generic.List[string]]::new()
+    if ($AcrPullPassword) { $acrLines.Add("`$AcrPullPassword = `"$AcrPullPassword`"") }
+    $acrSection = if ($acrLines.Count -gt 0) {
+        "`n# ACR pull-token password (keeps this out of deploy-aci.ps1's own PROVIDER section --`n" +
+        "# that file is synced to the public partner onboarding repo)`n" + ($acrLines -join "`n")
+    } else { "" }
+
     $configContent = @"
 # =====================================================================
 # EasySOC deploy config -- generated by Prepare-Tenant.ps1 on $generated
@@ -323,10 +452,15 @@ $dryNote
 # Azure Files (storage key fetched automatically by deploy-aci.ps1)
 `$StorageAccount       = "$StorageAccountName"
 `$FileShare            = "$FileShareName"
+# Resource group the storage account itself lives in -- only differs from
+# `$ResourceGroup above when an existing account with this name was found (and
+# reused) in a different resource group; see Prepare-Tenant.ps1 step 6.
+`$StorageResourceGroup = "$StorageResourceGroup"
 
 # Application
 `$SocCustomerId        = "$CustomerId"
-`$SocCaseBackend       = "xdr"
+`$SocCaseBackend       = "$CaseBackend"
+`$SiemTenantSku        = "$TenantSku"
 `$MsTenantId           = "$TenantId"
 `$MsClientId           = "$AppId"
 `$MsClientSecret       = "$ClientSecret"
@@ -334,6 +468,18 @@ $dryNote
 
 # Sentinel
 `$MsSentinelWorkspace  = "$SentinelWorkspaceId"
+
+# Sentinel case backend (only used when `$SocCaseBackend is switched to
+# "sentinel" -- SocCaseBackend above stays "xdr" by default; edit this file
+# by hand to opt in). Resource group/workspace name are auto-populated from
+# the same workspace-ARM-ID parse used for the shared key above; the
+# service-principal object ID is this same app registration's SP objectId
+# (same identity as `$MsClientId, just its object ID rather than its
+# application ID -- used to tell the agent's own incident comments apart
+# from a human reply).
+`$MsSentinelResourceGroup = "$_laResourceGroup"
+`$MsSentinelWorkspaceName = "$_laWorkspaceName"
+`$MsSentinelSpObjectId    = "$ObjectId"
 
 # ACI container-log integration (same workspace as Sentinel above; set at deploy
 # time only - Azure Portal doesn't support this for the agent's container config)
@@ -355,6 +501,7 @@ $dryNote
 `$TeamsTeamId          = "$TeamsTeamId"
 `$TeamsChannelId       = "$TeamsChannelId"
 $bootstrapSection
+$acrSection
 # Threat-intel enrichment (optional)
 `$VirusTotalApiKey     = "$VirusTotalApiKey"
 `$AbuseIpDbApiKey      = "$AbuseIpDbApiKey"
@@ -519,6 +666,17 @@ if ($DryRun) {
 
 # Step 6: storage account + Files share
 Write-Step "6/8" "Creating Azure Storage account '$StorageAccountName' and Files share '$FileShareName'"
+# Defaults to $ResourceGroup; only diverges if an existing account with this exact
+# name is found in a DIFFERENT resource group and reused in place (see below) --
+# storage account names are globally unique across ALL of Azure (not just this
+# subscription or resource group), so "not found in $ResourceGroup" does not mean
+# "name is free": you can already own it elsewhere (e.g. a partial prior run
+# against a different -ResourceGroup), and a bare `create` would then fail with
+# StorageAccountAlreadyTaken instead of offering to reuse it. Persisted into the
+# generated config distinctly from $ResourceGroup so deploy-aci.ps1's own storage-key
+# fetch looks in the right place too.
+$StorageResourceGroup = $ResourceGroup
+
 if ($DryRun) {
     Write-Info "DRY RUN: would ensure resource group '$ResourceGroup' ($Location), storage account '$StorageAccountName', and file share '$FileShareName' (5 GiB)."
 } else {
@@ -536,23 +694,102 @@ if ($DryRun) {
         Write-Info "Resource group '$ResourceGroup' already exists"
     }
 
-    $existingSa = $null
-    try {
-        $existingSa = az storage account show --name $StorageAccountName --resource-group $ResourceGroup 2>$null | ConvertFrom-Json
-    } catch {}
-    if ($existingSa) {
-        Write-Skip "storage account '$StorageAccountName'"
-    } else {
-        az storage account create --name $StorageAccountName --resource-group $ResourceGroup `
-            --location $Location --sku "Standard_LRS" --kind "StorageV2" `
-            --allow-blob-public-access false --min-tls-version "TLS1_2" | Out-Null
-        if ($LASTEXITCODE -ne 0) { throw "Storage account creation failed (check Contributor on '$ResourceGroup')." }
-        Write-Ok "Storage account created"
+    # Loops (rather than a single attempt) so a name collision that can't be resolved
+    # by reuse -- see the StorageAccountAlreadyTaken branch below -- lets you type a
+    # different name right here instead of restarting the whole script from step 1.
+    $storageReady = $false
+    while (-not $storageReady) {
+        $existingSa = $null
+        try {
+            $existingSa = az storage account show --name $StorageAccountName --resource-group $ResourceGroup 2>$null | ConvertFrom-Json
+        } catch {}
+
+        if ($existingSa) {
+            Write-Skip "storage account '$StorageAccountName' (in '$ResourceGroup')"
+            $StorageResourceGroup = $ResourceGroup
+            $storageReady = $true
+            continue
+        }
+
+        # Not in the target RG -- check the rest of the subscription before assuming
+        # the name is free (storage account names are globally unique across ALL of
+        # Azure, not just this RG, so "not found here" doesn't mean "free").
+        $subMatches = $null
+        try {
+            $subMatches = az storage account list --query "[?name=='$StorageAccountName']" --output json 2>$null | ConvertFrom-Json
+        } catch {}
+
+        if ($subMatches -and $subMatches.Count -gt 0) {
+            $foundRg = $subMatches[0].resourceGroup
+            Write-Info "Storage account '$StorageAccountName' already exists in resource group '$foundRg' (not '$ResourceGroup')."
+            $reuse = $true
+            if (-not $NonInteractive) {
+                $answer = (Read-Host "  Reuse it there instead of creating a new one? (Y/n)").Trim()
+                $reuse = (-not $answer) -or ($answer -match "^(?i)y")
+            }
+            if ($reuse) {
+                $StorageResourceGroup = $foundRg
+                Write-Ok "Reusing storage account '$StorageAccountName' from '$foundRg'"
+                $storageReady = $true
+                continue
+            }
+            if ($NonInteractive) {
+                throw "Storage account name '$StorageAccountName' is in use in resource group '$foundRg'. Re-run with a different -StorageAccountName."
+            }
+            $StorageAccountName = (Read-Host "  Enter a different storage account name (3-24 lowercase letters/digits)").Trim()
+            if ($StorageAccountName -notmatch "^[a-z0-9]{3,24}$") { throw "Storage account name must be 3-24 lowercase letters/digits." }
+            continue
+        }
+
+        # Not found via show or list -- attempt creation directly. A prior version of
+        # this script tried to pre-check with `az storage account check-name-availability`
+        # to give a cleaner error before attempting creation, but that API was observed
+        # to disagree with the actual create call for a name that's still taken --
+        # reacting to the real creation failure (below) is the reliable signal.
+        #
+        # Redirect stderr to a FILE, not `2>&1`: az routinely writes informational text
+        # (e.g. "...will continue to update the existing account") to stderr even on a
+        # call that isn't actually failing, and `2>&1` routes that through PowerShell's
+        # native-command error-record pipeline, where -- depending on PS version/session
+        # settings ($PSNativeCommandUseErrorActionPreference) -- $ErrorActionPreference =
+        # "Stop" (set globally at the top of this script) can promote it straight to a
+        # terminating exception before $LASTEXITCODE is even checked, aborting the
+        # script here instead of letting the retry logic below react to a genuine
+        # failure. File redirection (like the `2>$null` calls already used safely
+        # throughout this script) never enters that pipeline, sidestepping the
+        # version-dependent behavior entirely rather than trying to out-guess it.
+        $errFile = [System.IO.Path]::GetTempFileName()
+        try {
+            az storage account create --name $StorageAccountName --resource-group $StorageResourceGroup `
+                --location $Location --sku "Standard_LRS" --kind "StorageV2" `
+                --allow-blob-public-access false --min-tls-version "TLS1_2" 1>$null 2>$errFile
+            $createExitCode = $LASTEXITCODE
+            $errText = if (Test-Path $errFile) { Get-Content $errFile -Raw } else { "" }
+        } finally {
+            Remove-Item $errFile -ErrorAction SilentlyContinue
+        }
+        if ($createExitCode -eq 0) {
+            Write-Ok "Storage account created"
+            $storageReady = $true
+            continue
+        }
+
+        if ($errText -match "StorageAccountAlreadyTaken") {
+            Write-Warning "'$StorageAccountName' isn't visible via 'show'/'list' in this subscription, but Azure still reports the name as taken. Storage account names live in a global DNS namespace (<name>.blob.core.windows.net) -- the most common cause is a stale name reservation left behind by a PREVIOUSLY DELETED account with this exact name, which can outlive the account itself for a period. There is nothing to reuse here (it isn't a resource this subscription can see or manage); the practical fix is a different name."
+            if ($NonInteractive) {
+                throw "Storage account name '$StorageAccountName' is unavailable (StorageAccountAlreadyTaken) and not owned by this subscription. Re-run with a different -StorageAccountName."
+            }
+            $StorageAccountName = (Read-Host "  Enter a different storage account name (3-24 lowercase letters/digits)").Trim()
+            if ($StorageAccountName -notmatch "^[a-z0-9]{3,24}$") { throw "Storage account name must be 3-24 lowercase letters/digits." }
+            continue
+        }
+
+        throw "Storage account creation failed (check Contributor on '$StorageResourceGroup'):`n$errText"
     }
 
     $storageKey = az storage account keys list --account-name $StorageAccountName `
-        --resource-group $ResourceGroup --query "[0].value" --output tsv
-    if ($LASTEXITCODE -ne 0 -or -not $storageKey) { throw "Failed to retrieve storage account key for '$StorageAccountName'." }
+        --resource-group $StorageResourceGroup --query "[0].value" --output tsv
+    if ($LASTEXITCODE -ne 0 -or -not $storageKey) { throw "Failed to retrieve storage account key for '$StorageAccountName' (resource group '$StorageResourceGroup')." }
 
     $existingShare = az storage share exists --name $FileShareName --account-name $StorageAccountName `
         --account-key $storageKey --query "exists" --output tsv
@@ -569,6 +806,12 @@ if ($DryRun) {
 # Step 7: Sentinel workspace discovery + Reader role
 Write-Step "7/8" "Discovering Sentinel / Log Analytics workspace and assigning Sentinel Reader"
 $LogAnalyticsWorkspaceKey = ""
+# Populated below (elseif branch, workspace ARM ID parse) when discovery
+# succeeds -- declared here with Set-StrictMode-safe defaults since
+# Write-DeployConfig reads them even when that branch never runs (e.g.
+# Sentinel skipped, or ARM ID parse fails).
+$_laResourceGroup = ""
+$_laWorkspaceName = ""
 if ($SentinelWorkspaceId -eq "none") {
     Write-Info "Sentinel explicitly skipped (-SentinelWorkspaceId none)."
     $SentinelWorkspaceId = ""
@@ -593,9 +836,9 @@ if ($SentinelWorkspaceId) {
         $workspaceArmId = az monitor log-analytics workspace list --query $wsQuery --output tsv
     }
     if (-not $workspaceArmId) {
-        Write-Warning "Could not resolve workspace ARM ID for customerId '$SentinelWorkspaceId'. Assign the Sentinel Reader role manually."
+        Write-Warning "Could not resolve workspace ARM ID for customerId '$SentinelWorkspaceId'. Assign the Sentinel Reader/Responder roles manually."
     } elseif ($DryRun) {
-        Write-Info "DRY RUN: would assign 'Microsoft Sentinel Reader' to the service principal on $workspaceArmId."
+        Write-Info "DRY RUN: would assign 'Microsoft Sentinel Reader' and 'Microsoft Sentinel Responder' to the service principal on $workspaceArmId."
     } else {
         $existingRa = az role assignment list --assignee $sp.id --role "Microsoft Sentinel Reader" `
             --scope $workspaceArmId --query "[0].id" --output tsv
@@ -607,6 +850,25 @@ if ($SentinelWorkspaceId) {
                 Write-Warning "Role assignment failed. Run: az role assignment create --assignee $($sp.id) --role 'Microsoft Sentinel Reader' --scope $workspaceArmId"
             } else {
                 Write-Ok "Sentinel Reader role assigned"
+            }
+        }
+
+        # Sentinel Responder: only Reader was needed while this app registration
+        # only ever read Sentinel (SIEM query tool, case-history search). The
+        # case_backend: sentinel option (writes labels/comments/classification
+        # directly to incidents) needs write access too -- assign it
+        # unconditionally alongside Reader so a partner can flip
+        # $SocCaseBackend to "sentinel" later without a second manual role grant.
+        $existingRaResponder = az role assignment list --assignee $sp.id --role "Microsoft Sentinel Responder" `
+            --scope $workspaceArmId --query "[0].id" --output tsv
+        if ($existingRaResponder) {
+            Write-Skip "Sentinel Responder role"
+        } else {
+            az role assignment create --assignee $sp.id --role "Microsoft Sentinel Responder" --scope $workspaceArmId --output none
+            if ($LASTEXITCODE -ne 0) {
+                Write-Warning "Role assignment failed. Run: az role assignment create --assignee $($sp.id) --role 'Microsoft Sentinel Responder' --scope $workspaceArmId"
+            } else {
+                Write-Ok "Sentinel Responder role assigned"
             }
         }
     }
@@ -638,12 +900,19 @@ if ($SentinelWorkspaceId) {
 # Step 8: Foundry inference endpoint + non-retrievable prompts
 Write-Step "8/8" "Inference endpoint, Teams, and enrichment configuration"
 
-# Resolve effective backend (blank => anthropic)
-if (-not $LlmBackend) { $LlmBackend = "anthropic" }
+# Whether the caller explicitly chose a backend. Captured BEFORE any default is
+# applied, and deliberately not defaulted here at all: a default applied at this
+# point would make the "Confirm / prompt inference values" Read-Value call below a
+# no-op (Read-Value returns $Current immediately once it's non-empty, without ever
+# calling Read-Host) -- exactly the bug this replaces, where the script silently
+# assumed "anthropic" and never actually asked.
+$_llmBackendExplicit = [bool]$LlmBackend
 
-# Azure AI Foundry / Cognitive Services discovery (best effort).
-# Runs when the relevant key for the chosen backend is not yet supplied.
-$_needsDiscovery = ($LlmBackend -eq "anthropic" -and -not $AnthropicApiKey) -or
+# Azure AI Foundry / Cognitive Services discovery (best effort). Runs whenever no
+# backend has been decided yet, or the relevant key for an explicitly-chosen backend
+# is still missing.
+$_needsDiscovery = (-not $_llmBackendExplicit) -or
+                   ($LlmBackend -eq "anthropic" -and -not $AnthropicApiKey) -or
                    ($LlmBackend -eq "azure_openai" -and -not $AzureOpenAiApiKey)
 if ($_needsDiscovery -and -not $NonInteractive) {
     $cog = $null
@@ -661,16 +930,46 @@ if ($_needsDiscovery -and -not $NonInteractive) {
             $keyOk = ($LASTEXITCODE -eq 0 -and $key)
             if (-not $keyOk) { Write-Warning "Could not read Foundry key automatically; enter it below." }
 
-            if ($LlmBackend -eq "azure_openai") {
+            if ($fr.kind -eq "OpenAI") {
+                # An "OpenAI"-kind Cognitive Services resource has NO Anthropic-
+                # compatible endpoint -- it can only ever serve the azure_openai
+                # backend. Filing it under Anthropic (the old bug) produces an
+                # AnthropicBaseUrl that silently doesn't work.
+                if ($_llmBackendExplicit -and $LlmBackend -ne "azure_openai") {
+                    Write-Warning "Found an Azure OpenAI-kind resource ('$($fr.name)'), but -LlmBackend was '$LlmBackend' -- it has no Anthropic-compatible endpoint, so it can't be auto-filled for that backend. Enter Anthropic values below, or re-run with -LlmBackend azure_openai to use it."
+                } else {
+                    $LlmBackend = "azure_openai"
+                    $AzureOpenAiEndpoint = ($fr.endpoint).TrimEnd('/')
+                    if ($keyOk) { $AzureOpenAiApiKey = $key }
+                    Write-Ok "Foundry endpoint (Azure OpenAI): $AzureOpenAiEndpoint$(if ($keyOk) { ' (key retrieved)' })"
+                }
+            } elseif ($_llmBackendExplicit) {
+                # "AIServices" (or another qualifying kind) can serve either backend --
+                # respect the caller's explicit choice, as before.
+                if ($LlmBackend -eq "azure_openai") {
+                    $AzureOpenAiEndpoint = ($fr.endpoint).TrimEnd('/')
+                    if ($keyOk) { $AzureOpenAiApiKey = $key }
+                    Write-Ok "Foundry endpoint (Azure OpenAI): $AzureOpenAiEndpoint$(if ($keyOk) { ' (key retrieved)' })"
+                } else {
+                    $base = ($fr.endpoint).TrimEnd('/')
+                    if ($base -notmatch '/anthropic$') { $base = "$base/anthropic" }
+                    $AnthropicBaseUrl = $base
+                    if ($keyOk) { $AnthropicApiKey = $key }
+                    Write-Ok "Foundry endpoint (Anthropic): $AnthropicBaseUrl$(if ($keyOk) { ' (key retrieved)' })"
+                }
+            } else {
+                # Ambiguous: no backend was requested and this resource kind can serve
+                # either. Don't guess -- pre-fill BOTH slots from the discovered
+                # endpoint/key so whichever backend gets picked at the prompt below
+                # already has working values, and leave $LlmBackend blank so that
+                # prompt actually fires instead of silently deciding for the user.
                 $AzureOpenAiEndpoint = ($fr.endpoint).TrimEnd('/')
                 if ($keyOk) { $AzureOpenAiApiKey = $key }
-                Write-Ok "Foundry endpoint (Azure OpenAI): $AzureOpenAiEndpoint$(if ($keyOk) { ' (key retrieved)' })"
-            } else {
                 $base = ($fr.endpoint).TrimEnd('/')
                 if ($base -notmatch '/anthropic$') { $base = "$base/anthropic" }
                 $AnthropicBaseUrl = $base
                 if ($keyOk) { $AnthropicApiKey = $key }
-                Write-Ok "Foundry endpoint (Anthropic): $AnthropicBaseUrl$(if ($keyOk) { ' (key retrieved)' })"
+                Write-Ok "Foundry resource '$($fr.name)' ($($fr.kind)) supports either backend -- both are pre-filled$(if ($keyOk) { ' (key retrieved)' }); choose which to use below."
             }
         }
     } else {
@@ -678,8 +977,12 @@ if ($_needsDiscovery -and -not $NonInteractive) {
     }
 }
 
-# Confirm / prompt inference values for the chosen backend
+# Confirm / prompt inference values for the chosen backend. If nothing above decided
+# $LlmBackend (no Foundry resource found, ambiguous kind left it for the user, or
+# -AllowNone was declined), this Read-Value call is what actually asks -- and now can,
+# since nothing set a default ahead of it.
 $LlmBackend = Read-Value "  LLM backend (anthropic / azure_openai)" $LlmBackend
+if (-not $LlmBackend) { $LlmBackend = "anthropic" }
 if ($LlmBackend -eq "azure_openai") {
     $AzureOpenAiEndpoint   = Read-Value "  Azure OpenAI endpoint" $AzureOpenAiEndpoint
     $AzureOpenAiApiKey     = Read-Value "  Azure OpenAI API key" $AzureOpenAiApiKey
@@ -690,12 +993,32 @@ if ($LlmBackend -eq "azure_openai") {
     $AnthropicApiKey  = Read-Value "  Anthropic / Foundry API key (blank = fill provider POC key in deploy-aci)" $AnthropicApiKey
 }
 
-# Teams (not auto-retrievable)
-Write-Host ""
-Write-Host "  Teams output (from the channel's Workflows webhook + channel URL; blank to disable):" -ForegroundColor Cyan
-$TeamsWebhookUrl = Read-Value "  Teams Workflows webhook URL" $TeamsWebhookUrl
-$TeamsTeamId     = Read-Value "  Teams team/group ID (GUID)"   $TeamsTeamId
-$TeamsChannelId  = Read-Value "  Teams channel ID (19:...@thread.tacv2)" $TeamsChannelId
+# Teams (not auto-retrievable). Gated by -TeamsMode:
+#   full         - prompt for all three (posting + report delivery + reply-polling).
+#   webhook_only - prompt for the webhook only; team_id/channel_id stay blank on
+#                  purpose -- they're only used for reply-polling, which cannot work
+#                  cross-tenant (see -TeamsMode's doc comment). Report delivery still
+#                  works fully in this mode; it needs no team_id/channel_id at all.
+#   none         - no Teams at all; all three stay blank, no prompt.
+if ($TeamsMode -eq "none") {
+    Write-Info "Teams disabled (-TeamsMode none) -- skipping Teams prompts."
+    $TeamsWebhookUrl = ""
+    $TeamsTeamId     = ""
+    $TeamsChannelId  = ""
+} else {
+    Write-Host ""
+    if ($TeamsMode -eq "webhook_only") {
+        Write-Host "  Teams output (posting + report delivery -- webhook_url; -TeamsMode webhook_only leaves team_id/channel_id blank):" -ForegroundColor Cyan
+        $TeamsWebhookUrl = Read-Value "  Teams Workflows webhook URL" $TeamsWebhookUrl
+        $TeamsTeamId     = ""
+        $TeamsChannelId  = ""
+    } else {
+        Write-Host "  Teams output (from the channel's Workflows webhook + channel URL; blank to disable):" -ForegroundColor Cyan
+        $TeamsWebhookUrl = Read-Value "  Teams Workflows webhook URL" $TeamsWebhookUrl
+        $TeamsTeamId     = Read-Value "  Teams team/group ID (GUID)"   $TeamsTeamId
+        $TeamsChannelId  = Read-Value "  Teams channel ID (19:...@thread.tacv2)" $TeamsChannelId
+    }
+}
 
 # Enrichment (optional)
 Write-Host ""
@@ -712,6 +1035,13 @@ Write-Host "  Control server override (optional; blank = use deploy-aci.ps1's de
 $BootstrapUrl       = Read-Value "  Bootstrap URL (e.g. https://<soc-server-fqdn>)" $BootstrapUrl
 $BootstrapToken     = Read-Value "  Bootstrap token"                               $BootstrapToken
 $BootstrapTlsVerify = Read-Value "  Bootstrap TLS verify (true/false/CA path)"     $BootstrapTlsVerify
+
+# ACR pull-token password (optional - see .PARAMETER AcrPullPassword). Blank = leave it
+# for deploy-aci.ps1 to prompt for interactively instead; never written to deploy-aci.ps1
+# itself, only to this tenant's own gitignored config file below.
+Write-Host ""
+Write-Host "  ACR pull-token password (optional; blank = deploy-aci.ps1 prompts for it instead):" -ForegroundColor Cyan
+$AcrPullPassword = Read-Value "  ACR pull-token password" $AcrPullPassword
 
 # ---------------------------------------------------------------------------
 # write config file consumed by deploy-aci.ps1
@@ -738,7 +1068,10 @@ Write-Host "  App name      : $AppName"
 Write-Host "  appId         : $($app.appId)"
 Write-Host "  objectId      : $($sp.id)"
 Write-Host "  Secret expiry : $SecretExpiry"
-if (-not $SentinelWorkspaceId) { Write-Host "  Sentinel      : (skipped - assign Reader role manually if added later)" -ForegroundColor Yellow }
+Write-Host "  Case backend  : $CaseBackend"
+Write-Host "  Tenant SKU    : $TenantSku (SIEM query routing)"
+Write-Host "  Graph perms   : $($RequiredGraphPermissions.Count) requested ($($RequiredGraphPermissions -join ', '))"
+if (-not $SentinelWorkspaceId) { Write-Host "  Sentinel      : (skipped - assign Reader/Responder roles manually if added later)" -ForegroundColor Yellow }
 if ($SentinelWorkspaceId -and -not $LogAnalyticsWorkspaceKey -and -not $DryRun) { Write-Host "  ACI logging   : (shared key retrieval failed - add LogAnalyticsWorkspaceKey to config manually)" -ForegroundColor Yellow }
 if ($LlmBackend -eq "azure_openai") {
     if (-not $AzureOpenAiApiKey -or -not $AzureOpenAiEndpoint) {
@@ -747,8 +1080,10 @@ if ($LlmBackend -eq "azure_openai") {
 } elseif (-not $AnthropicApiKey) {
     Write-Host "  Inference key : (blank - provide before/at deploy time)" -ForegroundColor Yellow
 }
-if (-not $TeamsWebhookUrl)     { Write-Host "  Teams         : (disabled - no webhook provided)" -ForegroundColor Yellow }
+Write-Host "  Teams mode    : $TeamsMode"
+if ($TeamsMode -ne "none" -and -not $TeamsWebhookUrl) { Write-Host "  Teams         : (disabled - no webhook provided)" -ForegroundColor Yellow }
 if ($BootstrapUrl) { Write-Host "  Bootstrap     : override -> $BootstrapUrl (deploy-aci.ps1 PROVIDER default overridden)" -ForegroundColor Yellow }
+if ($AcrPullPassword) { Write-Host "  ACR password  : supplied -- deploy-aci.ps1 will not prompt for it" } else { Write-Host "  ACR password  : not supplied -- deploy-aci.ps1 will prompt for it (unless -NonInteractive there too)" -ForegroundColor Yellow }
 Write-Host ""
 if ($DryRun) {
     Write-Host "  Next: re-run WITHOUT -DryRun to provision and write real appId/objectId/secret." -ForegroundColor Magenta
