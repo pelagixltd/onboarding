@@ -1,12 +1,12 @@
-# EasySOC — Partner Tenant Preparation Guide v16
+# EasySOC — Partner Tenant Preparation Guide v17
 
 > **Audience:** Partner technical engineer
 > **Purpose:** The engineering run procedure — prepare a customer tenant and deploy the agent container using the two provided scripts (`Prepare-Tenant.ps1` + `deploy-aci.ps1`)
 > **Scope:** Procedure only. This guide assumes the tenant is already ready.
 > - Tenant readiness (resources/licenses/services + pre-flight checklist) → **[Tenant Prerequisites](./Tenant%20Prerequisites.md)**
 > - What the agent can access, what leaves the tenant, app permissions, egress → **[Tenant Data Sovereignty and Access](./Tenant%20Data%20Sovereignty%20and%20Access.md)**
-> **Last updated:** 2026-09-06
-> **Supersedes:** Partner Tenant Preparation Guide v15 — new **Step 8b** explains how to edit auto-close rules and pre-enrichment SIEM bundles for an **already-deployed** tenant, without an image rebuild or redeploy — both files now live on the same Azure Files share already mounted for audit persistence, not baked into the container image. No other procedural change from v15.
+> **Last updated:** 2026-09-20
+> **Supersedes:** Partner Tenant Preparation Guide v16 — Step 3 now names the three audit resources the script creates in the customer tenant — the Data Collection Endpoint `dce-easysoc-<customer-id>`, the Data Collection Rule `dcr-easysoc-<customer-id>`, and the `EasySOC_Audit_CL` custom table in the customer’s own Log Analytics workspace — together with the **Monitoring Metrics Publisher** assignment scoped to that one rule. Adds the instruction to re-run Step 3 after an EasySOC update that changes the audit schema: the script now upgrades an existing table or rule that is short of columns instead of reporting it as already present. None of this was documented before; the script has been creating these resources for some time.
 > **Prior:** v15 added `-TenantSku`. v14 changed report delivery to ride the webhook POST instead of Graph. v12 added `-CaseBackend` and `-TeamsMode`. v11 added the Azure OpenAI backend and documented the Bootstrap-override parameters.
 
 ---
@@ -99,7 +99,7 @@ To get this from the browser URL:
 
 ### Step 2b — Extend the flow for report delivery (required for `-TeamsMode full` or `webhook_only`)
 
-**Skip this step if you're using `-TeamsMode none`.** The agent sends the investigation report alongside the card in the same webhook POST, as a sibling JSON field: `{"filename": "...", "contentBase64": "..."}` under the key `report`. Nothing in this codebase can write that report into the customer's SharePoint from the *agent's* side. Instead, **the flow itself** (created in Step 2, already authorized in this tenant) must be extended to do the write, using its own SharePoint connection:
+**Skip this step if you're using `-TeamsMode none`.** The agent sends the investigation report alongside the card in the same webhook POST, as a sibling JSON field: `{"filename": "...", "contentBase64": "..."}` under the key `report`. Nothing in this codebase can write that report into the customer's SharePoint from the *agent's* side — see Instead, **the flow itself** (created in Step 2, already authorized in this tenant) must be extended to do the write, using its own SharePoint connection:
 
 1. Open the flow (Teams channel → `···` → **Workflows** → the `EasySOC` flow you created in Step 2 → **Edit**).
 2. Add a **Condition**: `@not(equals(triggerBody()?['report'], null))`.
@@ -206,6 +206,10 @@ az role assignment create `
 
 > **ACI container-log integration:** the script also retrieves the same workspace's shared key and writes it to `easysoc-deploy.config.ps1` as `LogAnalyticsWorkspaceId`/`LogAnalyticsWorkspaceKey`. `deploy-aci.ps1` (Step 6) passes these to `az container create --log-analytics-workspace`/`--log-analytics-workspace-key` — **the only way** to get `soc-agent`'s logs into Log Analytics. The Azure Portal's own Log Analytics blade refuses to configure this for the container group (it uses secure environment variables plus an Azure Files volume mount, which the Portal wizard treats as "advanced configuration" and won't touch), and the integration can only be set at container-group *creation*, never added to a running group afterward. If the shared key can't be retrieved, the script warns and leaves both blank — the deployment still succeeds, just without this logging path; fall back to `az container logs` (Step 8) or re-run Step 3 once the workspace issue is resolved and redeploy.
 
+> **Audit ingestion resources (new):** whenever a Sentinel workspace is selected, the script also creates a Data Collection Endpoint `dce-easysoc-<customer-id>`, a Data Collection Rule `dcr-easysoc-<customer-id>`, and the `EasySOC_Audit_CL` custom table in the customer's own workspace, then assigns the agent **Monitoring Metrics Publisher** on that one rule. That is how the agent's investigation record reaches Log Analytics instead of only the JSONL file on the Azure Files share. Nothing in it leaves the tenant — see [Tenant Data Sovereignty and Access](./Tenant%20Data%20Sovereignty%20and%20Access.md) §2. The table has to exist before the rule can reference it; a rule created against a missing table fails with `InvalidOutputTable`, so do not pre-create either by hand.
+
+> **Re-run Step 3 after an EasySOC update that changes the audit schema.** `Prepare-Tenant.ps1` is idempotent, and since 2026-09-20 it **upgrades** an existing table or rule that is short of columns rather than reporting it as already present and moving on. A tenant prepared before that date declares 10 of the 24 columns, and the other 14 — the harness's decision scalars — are discarded on ingest with HTTP 204 and no error in any log. One re-run fixes it; existing rows are untouched and keep their null values for the new columns.
+
 ---
 
 ## 2. Container Deployment — Step by Step
@@ -304,6 +308,7 @@ az container restart --resource-group rg-easysoc-poc --name soc-agent
 ```
 
 Use the same two commands (with `pre_enrichment_bundles.yaml`/`--path pre_enrichment_bundles.yaml`) for pre-enrichment bundles. Confirm the file was picked up via startup logs (`az container logs -g rg-easysoc-poc -n soc-agent`) — a bad or missing file degrades gracefully (empty rule set, not a crash), so a silent no-op after upload usually means the `--path` or share name didn't match what `deploy-aci.ps1` actually mounted; re-check against the deploy output.
+
 
 ---
 

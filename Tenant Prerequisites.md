@@ -1,12 +1,12 @@
-# EasySOC — Tenant Prerequisites v11
+# EasySOC — Tenant Prerequisites v12
 
 > **Audience:** Partner technical engineer responsible for customer tenant preparation
 > **Purpose:** Definitive checklist of the **resources, licenses, and services that must already exist** in the customer's Microsoft 365 / Azure tenant before EasySOC onboarding begins
 > **Scope:** Prerequisites only — the "is the tenant ready?" gate.
 > - The step-by-step run procedure is in **[Partner Tenant Preparation Guide](./Partner%20Tenant%20Preparation%20Guide.md)**.
 > - The agent's access rights, the data it touches, what leaves the tenant, and the egress allow-list are in **[Tenant Data Sovereignty and Access](./Tenant%20Data%20Sovereignty%20and%20Access.md)**.
-> **Last updated:** 2026-09-06
-> **Supersedes:** Tenant Prerequisites v10 — two factual corrections, no procedural changes: (1) §8's agent container image referenced the retired `easysoc.azurecr.io` registry (confirmed dead via `az acr show -n easysoc` → `ResourceNotFound`); corrected to the current `easysoccr-gyfwc2acakhmg5h0.azurecr.io`, matching `deploy-aci.ps1`'s actual PROVIDER section. (2) Cross-references to the Partner Tenant Preparation Guide still pointed at v14, which has since moved to v16 — updated throughout.
+> **Last updated:** 2026-09-20
+> **Supersedes:** Tenant Prerequisites v11 — §6 adds the **`Microsoft.Insights`** resource provider and the `monitor-control-service` Azure CLI extension, both needed for the audit Data Collection Endpoint and Rule, and names the three audit resources the script creates in the customer tenant. Adds the re-run instruction: a tenant prepared before 2026-09-20 declares 10 of the 24 `EasySOC_Audit_CL` columns, and the other 14 are discarded on ingest with HTTP 204 and no error in any log — one re-run of the preparation script fixes it.
 > **Prior:** v9 removed `Sites.ReadWrite.All` / same-tenant Graph requirement for report delivery — see v10's own superseded history for detail. v8 added §0a (choosing a case backend) and reworked §2/§3/§4/§7/§9 to be conditional on `-CaseBackend`/`-TeamsMode`. v7 added §5a, an Azure OpenAI alternative to the Anthropic/Foundry inference backend (`-LlmBackend azure_openai`).
 
 ---
@@ -166,9 +166,14 @@ The agent runs as an Azure Container Instance; the script creates the storage ac
 - [ ] An Azure subscription the engineer can deploy into, with **Contributor** on the target resource group (or subscription).
 - [ ] Ability to **register resource providers** (included in Contributor). The scripts auto-register what they need:
   - `Prepare-Tenant.ps1` registers `Microsoft.Storage` (a clean subscription otherwise fails storage creation with a misleading `SubscriptionNotFound`).
+  - `Prepare-Tenant.ps1` also needs **`Microsoft.Insights`** for the audit Data Collection Endpoint and Rule, and installs the `monitor-control-service` Azure CLI extension for the `az monitor data-collection *` commands.
   - `deploy-aci.ps1` registers `Microsoft.ContainerInstance`.
 - [ ] **Azure CLI installed** on the engineer's workstation (`az --version`).
 - [ ] If Foundry is in this subscription, also ensure the AI / Cognitive Services provider is registered (typically done by Foundry provisioning).
+
+> **The script also creates three audit resources in the customer tenant**, whenever a Sentinel workspace is selected: a Data Collection Endpoint `dce-easysoc-<customer-id>`, a Data Collection Rule `dcr-easysoc-<customer-id>`, and the `EasySOC_Audit_CL` custom table in the customer’s own Log Analytics workspace. They carry the agent’s own investigation record and nothing else, and none of it leaves the tenant — see [Tenant Data Sovereignty and Access](./Tenant%20Data%20Sovereignty%20and%20Access.md) §2. Do not pre-create them: the table has to exist before the rule can reference it, and a rule created against a missing table fails with `InvalidOutputTable`.
+
+> **Re-run the script after an EasySOC update that changes the audit schema.** `Prepare-Tenant.ps1` is idempotent and now **upgrades** an existing table or rule that is short of columns rather than skipping it. A tenant prepared before 2026-09-20 has 10 of the 24 columns, and the other 14 are discarded on ingest with HTTP 204 and no error anywhere.
 
 > **Do NOT pre-create the storage account** — `Prepare-Tenant.ps1` provisions a `StorageV2` account (`Standard_LRS`, TLS 1.2, public blob access off) and a 5 GiB Azure Files share for the audit volume. The container mounts it at `/app/audit`. If a storage account with your chosen name already exists elsewhere in the subscription (e.g. a partial prior run), the script now detects it and offers to reuse it in place, or lets you pick a different name on the spot — see the Preparation Guide's troubleshooting section.
 

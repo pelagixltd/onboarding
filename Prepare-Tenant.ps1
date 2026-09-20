@@ -20,7 +20,10 @@
          Teams mode -- see -TeamsMode's doc comment.)
       3. Provisions an Azure Storage account + Azure Files share for the audit volume.
       4. Discovers the Sentinel / Log Analytics workspace, assigns the Microsoft
-         Sentinel Reader role, and retrieves the workspace's shared key so
+         Sentinel Reader role, provisions the audit Data Collection Endpoint/Rule
+         and EasySOC_Audit_CL table (so internal-audit read/write actually works
+         instead of silently no-opping -- see agent/internal/casebackend/
+         auditcommon.go), and retrieves the workspace's shared key so
          deploy-aci.ps1 can enable ACI container-log integration on that same
          workspace (prompts only when more than one workspace exists).
       5. Discovers an Azure AI Foundry inference endpoint (prompts to pick / confirm).
@@ -349,6 +352,17 @@ function Confirm-AzCli {
     }
 }
 
+# `az monitor data-collection *` (DCE/DCR, used for the audit Data Collection
+# Rule below) lives in the monitor-control-service extension, not core az --
+# install it non-interactively rather than let az's own install-prompt hang
+# under -NonInteractive (it reads from stdin, which throws EOFError there).
+function Confirm-MonitorExtension {
+    $installed = az extension list --query "[?name=='monitor-control-service']" --output tsv 2>$null
+    if (-not $installed) {
+        az extension add --name monitor-control-service --only-show-errors --yes 2>$null | Out-Null
+    }
+}
+
 # Prompt for a free-text value (blank allowed) unless -NonInteractive.
 function Read-Value([string]$Prompt, [string]$Current) {
     if ($Current) { return $Current }
@@ -480,6 +494,12 @@ $dryNote
 `$MsSentinelResourceGroup = "$_laResourceGroup"
 `$MsSentinelWorkspaceName = "$_laWorkspaceName"
 `$MsSentinelSpObjectId    = "$ObjectId"
+
+# Audit DCR (Log Analytics ingestion for EasySOC_Audit_CL -- see
+# agent/internal/casebackend/auditcommon.go). Blank if Sentinel was skipped or
+# DCR provisioning failed -- internal audit falls back to JSONL-only in that case.
+`$XdrDcrEndpoint = "$XdrDcrEndpoint"
+`$XdrDcrRuleId   = "$XdrDcrRuleId"
 
 # ACI container-log integration (same workspace as Sentinel above; set at deploy
 # time only - Azure Portal doesn't support this for the agent's container config)
@@ -812,6 +832,12 @@ $LogAnalyticsWorkspaceKey = ""
 # Sentinel skipped, or ARM ID parse fails).
 $_laResourceGroup = ""
 $_laWorkspaceName = ""
+# Audit DCR (populated below, in the same $SentinelWorkspaceId block, once the
+# workspace ARM ID / resource group / name are resolved) -- Set-StrictMode-safe
+# defaults since Write-DeployConfig reads them even when DCR provisioning is
+# skipped or fails.
+$XdrDcrEndpoint = ""
+$XdrDcrRuleId   = ""
 if ($SentinelWorkspaceId -eq "none") {
     Write-Info "Sentinel explicitly skipped (-SentinelWorkspaceId none)."
     $SentinelWorkspaceId = ""
@@ -870,6 +896,220 @@ if ($SentinelWorkspaceId) {
             } else {
                 Write-Ok "Sentinel Responder role assigned"
             }
+        }
+    }
+
+    # Audit DCR: Data Collection Endpoint + Data Collection Rule + the
+    # EasySOC_Audit_CL custom table, so internal-audit read/write actually
+    # reaches Log Analytics instead of silently no-opping with "audit DCR not
+    # configured" (see agent/internal/casebackend/auditcommon.go). DCE/DCR
+    # names are namespaced per customer; the table name and column schema are
+    # fixed and shared across all customers -- must match auditcommon.go's
+    # `row` map exactly. Requires $workspaceArmId, $_laResourceGroup and
+    # $_laWorkspaceName, all resolved above.
+    $DceName        = "dce-easysoc-$CustomerId"
+    $DcrName        = "dcr-easysoc-$CustomerId"
+    $AuditTableName = "EasySOC_Audit_CL"
+
+    # ONE definition of the audit schema, used by the table and by the DCR's
+    # stream declaration below. They must agree: the Logs Ingestion API accepts
+    # a row with 204 and silently discards any field the stream does not
+    # declare, so a mismatch loses data with nothing in any log to say so.
+    #
+    # This must also match auditcommon.go's `row` map plus everything
+    # derivationAuditColumns adds. BUG-033: the first ten were declared and the
+    # fourteen derivation fields were not, so every Band_s, Branch_s,
+    # Separation_d ... value the agent ever wrote was dropped on the floor.
+    $AuditColumnSpec = [ordered]@{
+        # auditcommon.go writeInternalAudit `row`
+        'TimeGenerated'        = 'datetime'
+        'IncidentId_s'         = 'string'
+        'InvestigationId_g'    = 'string'
+        'AuditBody_s'          = 'string'
+        'CostUSD_d'            = 'real'
+        'InputTokens_d'        = 'real'
+        'OutputTokens_d'       = 'real'
+        'DurationMs_d'         = 'real'
+        'LLMCalls_d'           = 'real'
+        'ToolCalls_d'          = 'real'
+        # auditcommon.go derivationAuditColumns -- absent when no hypothesis
+        # set was produced, which reads as "the harness did not derive", and is
+        # why none of these is required on a row
+        'DerivationVersion_s'  = 'string'
+        'Band_s'               = 'string'
+        'Branch_s'             = 'string'
+        'Separation_d'         = 'real'
+        'Entropy_d'            = 'real'
+        'DisagreementMargin_d' = 'real'
+        'VerdictAgreement_b'   = 'boolean'
+        'CrossContradiction_b' = 'boolean'
+        'Resynthesized_b'      = 'boolean'
+        'Caps_s'               = 'string'
+        'ContextItems_d'       = 'real'
+        'ContextCorrob_d'      = 'real'
+        'ContextContra_d'      = 'real'
+        'ContextOnlyClosure_b' = 'boolean'
+    }
+    $AuditColumnArgs = @($AuditColumnSpec.GetEnumerator() | ForEach-Object { "$($_.Key)=$($_.Value)" })
+    $AuditColumnJson = (@($AuditColumnSpec.GetEnumerator() | ForEach-Object {
+        '          { "name": "' + $_.Key + '", "type": "' + $_.Value + '" }'
+    }) -join ",`n")
+
+    if ($DryRun) {
+        Write-Info "DRY RUN: would ensure DCE '$DceName', table '$AuditTableName' with $($AuditColumnSpec.Count) columns, DCR '$DcrName' declaring the same $($AuditColumnSpec.Count), and 'Monitoring Metrics Publisher' on the DCR for the service principal. An existing table or DCR with fewer columns is UPGRADED, not skipped (BUG-033)."
+    } elseif (-not $workspaceArmId) {
+        Write-Warning "Skipping audit DCR provisioning -- workspace ARM ID could not be resolved."
+    } else {
+        Confirm-MonitorExtension
+
+        $dce = az monitor data-collection endpoint show --name $DceName --resource-group $ResourceGroup 2>$null | ConvertFrom-Json
+        if ($dce) {
+            Write-Skip "Data Collection Endpoint '$DceName'"
+        } else {
+            $dce = az monitor data-collection endpoint create --name $DceName --resource-group $ResourceGroup `
+                --location $Location --public-network-access "Enabled" `
+                --description "EasySOC internal-audit ingestion endpoint (Logs Ingestion API -> $AuditTableName)" `
+                2>$null | ConvertFrom-Json
+            if (-not $dce) {
+                Write-Warning "Data Collection Endpoint creation failed. Internal audit to Log Analytics will stay disabled (JSONL-only) until this is provisioned manually."
+            } else {
+                Write-Ok "Data Collection Endpoint '$DceName' created"
+            }
+        }
+
+        # The destination table must exist before the DCR can reference it -- a
+        # DCR create against a not-yet-existing table fails with
+        # InvalidOutputTable. It is NOT auto-created on first ingest, despite
+        # auditcommon.go's comment assuming lazy creation (confirmed live
+        # 2026-09-09 against law-sentinel; see Experiments/Local Run Triage --
+        # 2026-09-08 Evening Batch in the project vault).
+        if ($dce) {
+            $existingTable = az monitor log-analytics workspace table show --resource-group $ResourceGroup `
+                --workspace-name $_laWorkspaceName --name $AuditTableName 2>$null | ConvertFrom-Json
+            if ($existingTable) {
+                # A tenant prepared before BUG-033 has the table but only the
+                # first ten columns, and the old code took "it exists" as "it is
+                # correct" and skipped. Re-running this script must UPGRADE such
+                # a tenant, or the fix never reaches anyone already onboarded.
+                $haveCols    = @($existingTable.schema.columns | ForEach-Object { $_.name })
+                $missingCols = @($AuditColumnSpec.Keys | Where-Object { $haveCols -notcontains $_ })
+                if ($missingCols.Count -eq 0) {
+                    Write-Skip "Log Analytics table '$AuditTableName'"
+                } else {
+                    Write-Info "Table '$AuditTableName' is missing $($missingCols.Count) column(s): $($missingCols -join ', ') -- updating"
+                    az monitor log-analytics workspace table update --resource-group $ResourceGroup `
+                        --workspace-name $_laWorkspaceName --name $AuditTableName `
+                        --columns $AuditColumnArgs --output none
+                    if ($LASTEXITCODE -ne 0) {
+                        Write-Warning "Log Analytics table '$AuditTableName' update failed. Existing rows keep working; the derivation columns stay dropped."
+                    } else {
+                        Write-Ok "Log Analytics table '$AuditTableName' updated to $($AuditColumnSpec.Count) columns"
+                    }
+                }
+            } else {
+                az monitor log-analytics workspace table create --resource-group $ResourceGroup `
+                    --workspace-name $_laWorkspaceName --name $AuditTableName `
+                    --columns $AuditColumnArgs `
+                    --description "EasySOC internal investigation audit trail (agent-written, cost/token/duration metrics per case)" `
+                    --output none
+                if ($LASTEXITCODE -ne 0) {
+                    Write-Warning "Log Analytics table '$AuditTableName' creation failed. Skipping DCR; internal audit stays JSONL-only."
+                    $dce = $null
+                } else {
+                    Write-Ok "Log Analytics table '$AuditTableName' created"
+                }
+            }
+        }
+
+        $dcr = $null
+        if ($dce) {
+            $dcr = az monitor data-collection rule show --name $DcrName --resource-group $ResourceGroup 2>$null | ConvertFrom-Json
+
+            # Same upgrade question as the table above: an existing DCR from
+            # before BUG-033 declares ten columns, and skipping it leaves the
+            # other fourteen silently dropped. Compare, and rewrite if short.
+            #
+            # NOTE: `az monitor data-collection rule update` (and a raw ARM
+            # PATCH) only accepts tags -- a PATCH carrying streamDeclarations
+            # returns 200 and changes nothing, which is how this was first
+            # missed on 2026-09-20. `rule create` is a PUT and replaces the
+            # rule, so the body below has to stay complete.
+            $dcrNeedsWrite = $true
+            if ($dcr) {
+                $dcrCols = @()
+                $decl = $dcr.streamDeclarations."Custom-$AuditTableName"
+                if ($decl) { $dcrCols = @($decl.columns | ForEach-Object { $_.name }) }
+                $dcrMissing = @($AuditColumnSpec.Keys | Where-Object { $dcrCols -notcontains $_ })
+                if ($dcrMissing.Count -eq 0) {
+                    Write-Skip "Data Collection Rule '$DcrName'"
+                    $dcrNeedsWrite = $false
+                } else {
+                    Write-Info "DCR '$DcrName' declares $($dcrCols.Count) of $($AuditColumnSpec.Count) columns, missing: $($dcrMissing -join ', ') -- rewriting"
+                }
+            }
+
+            if ($dcrNeedsWrite) {
+                $verb = if ($dcr) { "updated" } else { "created" }
+                $ruleFile = [System.IO.Path]::GetTempFileName()
+                $ruleBody = @"
+{
+  "properties": {
+    "dataCollectionEndpointId": "$($dce.id)",
+    "streamDeclarations": {
+      "Custom-$AuditTableName": {
+        "columns": [
+$AuditColumnJson
+        ]
+      }
+    },
+    "destinations": { "logAnalytics": [ { "workspaceResourceId": "$workspaceArmId", "name": "easysocAuditWorkspace" } ] },
+    "dataFlows": [ { "streams": ["Custom-$AuditTableName"], "destinations": ["easysocAuditWorkspace"], "outputStream": "Custom-$AuditTableName", "transformKql": "source" } ]
+  }
+}
+"@
+                Set-Content -Path $ruleFile -Value $ruleBody -Encoding UTF8
+                $dcr = az monitor data-collection rule create --name $DcrName --resource-group $ResourceGroup `
+                    --location $Location --data-collection-endpoint-id $dce.id --rule-file $ruleFile 2>$null | ConvertFrom-Json
+                Remove-Item $ruleFile -ErrorAction SilentlyContinue
+                if (-not $dcr) {
+                    Write-Warning "Data Collection Rule $verb failed. Internal audit to Log Analytics will stay disabled (JSONL-only) until this is provisioned manually."
+                } else {
+                    Write-Ok "Data Collection Rule '$DcrName' $verb ($($AuditColumnSpec.Count) columns)"
+                }
+            }
+        }
+
+        if ($dcr) {
+            # Monitoring Metrics Publisher on the DCR -- idempotent, with a short
+            # retry for ARM replication lag on a just-created DCR (same reasoning
+            # as the admin-consent retry loop in step 4). NOTE: if this script is
+            # ever run from Git Bash rather than PowerShell, a raw "/subscriptions/..."
+            # --scope argument can get silently mangled into a Windows path by
+            # MSYS path conversion, surfacing as a confusing "MissingSubscription"
+            # error from Azure -- not applicable here (this is a .ps1, run under
+            # PowerShell), but worth knowing if this logic is ever ported to a
+            # bash equivalent.
+            $existingRaMetrics = az role assignment list --assignee $sp.id --role "Monitoring Metrics Publisher" `
+                --scope $dcr.id --query "[0].id" --output tsv
+            if ($existingRaMetrics) {
+                Write-Skip "Monitoring Metrics Publisher role (on DCR)"
+            } else {
+                $metricsRaOk = $false
+                $metricsDeadline = (Get-Date).AddSeconds(60)
+                while (-not $metricsRaOk -and (Get-Date) -lt $metricsDeadline) {
+                    az role assignment create --assignee $sp.id --role "Monitoring Metrics Publisher" --scope $dcr.id --output none 2>$null
+                    if ($LASTEXITCODE -eq 0) { $metricsRaOk = $true } else { Start-Sleep -Seconds 10 }
+                }
+                if ($metricsRaOk) {
+                    Write-Ok "Monitoring Metrics Publisher role assigned (on DCR)"
+                } else {
+                    Write-Warning "Role assignment failed. Run: az role assignment create --assignee $($sp.id) --role 'Monitoring Metrics Publisher' --scope $($dcr.id)"
+                }
+            }
+
+            $XdrDcrEndpoint = $dce.logsIngestion.endpoint
+            $XdrDcrRuleId   = $dcr.immutableId
+            Write-Ok "Audit DCR ready: endpoint=$XdrDcrEndpoint rule=$XdrDcrRuleId"
         }
     }
 
@@ -1073,6 +1313,9 @@ Write-Host "  Tenant SKU    : $TenantSku (SIEM query routing)"
 Write-Host "  Graph perms   : $($RequiredGraphPermissions.Count) requested ($($RequiredGraphPermissions -join ', '))"
 if (-not $SentinelWorkspaceId) { Write-Host "  Sentinel      : (skipped - assign Reader/Responder roles manually if added later)" -ForegroundColor Yellow }
 if ($SentinelWorkspaceId -and -not $LogAnalyticsWorkspaceKey -and -not $DryRun) { Write-Host "  ACI logging   : (shared key retrieval failed - add LogAnalyticsWorkspaceKey to config manually)" -ForegroundColor Yellow }
+if ($SentinelWorkspaceId -and -not $DryRun) {
+    if ($XdrDcrRuleId) { Write-Host "  Audit DCR     : configured ($XdrDcrRuleId)" } else { Write-Host "  Audit DCR     : (not configured - internal audit will be JSONL-only; see warnings above)" -ForegroundColor Yellow }
+}
 if ($LlmBackend -eq "azure_openai") {
     if (-not $AzureOpenAiApiKey -or -not $AzureOpenAiEndpoint) {
         Write-Host "  Inference     : azure_openai (endpoint or key blank - provide before/at deploy time)" -ForegroundColor Yellow
