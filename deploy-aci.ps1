@@ -110,6 +110,7 @@ $LlmBackend          = ""           # "anthropic" (default) | "azure_openai"
 $AzureOpenAiApiKey   = ""
 $AzureOpenAiEndpoint = ""
 $AzureOpenAiDeployment = ""
+$AzureOpenAiApi      = ""           # "" = chat_completions | "responses" (required for gpt-6-sol)
 $TeamsWebhookUrl     = ""
 $TeamsTeamId         = ""
 $TeamsChannelId      = ""
@@ -291,6 +292,7 @@ $diagnostics
       - { name: LLM_BACKEND, value: "$LlmBackend" }
       - { name: AZURE_OPENAI_ENDPOINT, value: "$AzureOpenAiEndpoint" }
       - { name: AZURE_OPENAI_DEPLOYMENT, value: "$AzureOpenAiDeployment" }
+      - { name: AZURE_OPENAI_API, value: "$AzureOpenAiApi" }
       - { name: BOOTSTRAP_URL, value: "$BootstrapUrl" }
       - { name: BOOTSTRAP_TLS_VERIFY, value: "$BootstrapTlsVerify" }
       - { name: ANTHROPIC_API_KEY, secureValue: "$AnthropicApiKey" }

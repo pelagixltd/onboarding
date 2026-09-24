@@ -148,6 +148,11 @@
     Model deployment name in Azure AI Foundry (e.g. "gpt-5.4"). Prompted if omitted.
     Only used when LlmBackend=azure_openai.
 
+.PARAMETER AzureOpenAiApi
+    Azure OpenAI wire API: blank (= chat_completions) or "responses". gpt-6-sol needs
+    "responses" -- it refuses tools with reasoning on Chat Completions. Prompted if omitted.
+    Only used when LlmBackend=azure_openai.
+
 .PARAMETER TeamsWebhookUrl
     Teams Workflows webhook URL. Not auto-retrievable - prompted if omitted.
 
@@ -249,6 +254,7 @@ param(
     [string]$AzureOpenAiEndpoint  = "",
     [string]$AzureOpenAiApiKey    = "",
     [string]$AzureOpenAiDeployment = "",
+    [string]$AzureOpenAiApi       = "",
     [string]$TeamsWebhookUrl      = "",
     [string]$TeamsTeamId         = "",
     [string]$TeamsChannelId      = "",
@@ -515,6 +521,8 @@ $dryNote
 `$AzureOpenAiEndpoint  = "$AzureOpenAiEndpoint"
 `$AzureOpenAiApiKey    = "$AzureOpenAiApiKey"
 `$AzureOpenAiDeployment = "$AzureOpenAiDeployment"
+# Azure OpenAI wire API: blank = chat_completions; "responses" is required for gpt-6-sol
+`$AzureOpenAiApi       = "$AzureOpenAiApi"
 
 # Teams
 `$TeamsWebhookUrl      = "$TeamsWebhookUrl"
@@ -1227,6 +1235,7 @@ if ($LlmBackend -eq "azure_openai") {
     $AzureOpenAiEndpoint   = Read-Value "  Azure OpenAI endpoint" $AzureOpenAiEndpoint
     $AzureOpenAiApiKey     = Read-Value "  Azure OpenAI API key" $AzureOpenAiApiKey
     $AzureOpenAiDeployment = Read-Value "  Azure OpenAI deployment name (e.g. gpt-5.4)" $AzureOpenAiDeployment
+    $AzureOpenAiApi        = Read-Value "  Azure OpenAI API (blank = chat_completions; 'responses' for gpt-6-sol)" $AzureOpenAiApi
 } else {
     $LlmBackend       = "anthropic"
     $AnthropicBaseUrl = Read-Value "  Anthropic base URL (blank = public api.anthropic.com)" $AnthropicBaseUrl
