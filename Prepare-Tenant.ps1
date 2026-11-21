@@ -377,7 +377,9 @@ function Read-Value([string]$Prompt, [string]$Current) {
 }
 
 # Present a numbered list and return the chosen object. Honors -NonInteractive
-# (auto-selects when exactly one item; throws when ambiguous).
+# (auto-selects when exactly one item; throws when ambiguous). With -AllowNone
+# the single item is still offered interactively, but -NonInteractive takes it
+# (BUG-108).
 function Select-FromList {
     param(
         [object[]]$Items,
@@ -386,7 +388,7 @@ function Select-FromList {
         [switch]$AllowNone              # offer a "0) none / skip" choice
     )
     if (-not $Items -or $Items.Count -eq 0) { return $null }
-    if ($Items.Count -eq 1 -and -not $AllowNone) {
+    if ($Items.Count -eq 1 -and (-not $AllowNone -or $NonInteractive)) {
         $only = $Items[0]
         Write-Info "Auto-selected the only $($Label): $(& $Display $only)"
         return $only
@@ -564,7 +566,7 @@ Write-Info "Tenant: $TenantId"
 # Step 2: subscription selection (auto / prompt)
 Write-Step "2/8" "Selecting Azure subscription"
 if (-not $SubscriptionId) {
-    $subs = az account list --query "[?state=='Enabled']" --output json | ConvertFrom-Json
+    $subs = @(az account list --query "[?state=='Enabled']" --output json | ConvertFrom-Json | ForEach-Object { $_ })
     if (-not $subs -or $subs.Count -eq 0) { throw "No enabled subscriptions found for this account." }
     $chosen = Select-FromList -Items $subs -Label "subscription" `
         -Display { param($s) "$($s.name)  ($($s.id))" }
@@ -579,7 +581,7 @@ if (-not $DryRun) {
 # Resolve resource group (prompt with existing list if not supplied)
 if (-not $ResourceGroup) {
     if ($NonInteractive) { throw "-ResourceGroup is required with -NonInteractive." }
-    $rgs = az group list --query "[].{name:name,location:location}" --output json | ConvertFrom-Json
+    $rgs = @(az group list --query "[].{name:name,location:location}" --output json | ConvertFrom-Json | ForEach-Object { $_ })
     if ($rgs -and $rgs.Count -gt 0) {
         Write-Host ""
         Write-Host "  Existing resource groups:" -ForegroundColor Cyan
@@ -639,7 +641,10 @@ Write-Step "4/8" "Creating app registration '$AppName'"
 if ($DryRun) {
     Write-Info "DRY RUN: would create app registration '$AppName' + service principal, add $($RequiredGraphPermissions.Count) Graph permissions, and grant admin consent."
 } else {
-    $existingApps = az ad app list --display-name $AppName | ConvertFrom-Json
+    # List results are wrapped @(... | ForEach-Object { $_ }) (BUG-108): pwsh 7 turns
+    # an empty JSON list into $null (.Count throws under strict mode), and 5.1 hands
+    # back the array as one object, so a bare @() would nest it.
+    $existingApps = @(az ad app list --display-name $AppName | ConvertFrom-Json | ForEach-Object { $_ })
     if ($existingApps.Count -gt 0) {
         $app = $existingApps[0]
         Write-Skip "appId = $($app.appId)"
@@ -648,7 +653,7 @@ if ($DryRun) {
         Write-Ok "Created  appId = $($app.appId)"
     }
 
-    $existingSps = az ad sp list --filter "appId eq '$($app.appId)'" | ConvertFrom-Json
+    $existingSps = @(az ad sp list --filter "appId eq '$($app.appId)'" | ConvertFrom-Json | ForEach-Object { $_ })
     if ($existingSps.Count -gt 0) {
         $sp = $existingSps[0]
         Write-Skip "service principal objectId = $($sp.id)"
@@ -744,7 +749,7 @@ if ($DryRun) {
         # Azure, not just this RG, so "not found here" doesn't mean "free").
         $subMatches = $null
         try {
-            $subMatches = az storage account list --query "[?name=='$StorageAccountName']" --output json 2>$null | ConvertFrom-Json
+            $subMatches = @(az storage account list --query "[?name=='$StorageAccountName']" --output json 2>$null | ConvertFrom-Json | ForEach-Object { $_ })
         } catch {}
 
         if ($subMatches -and $subMatches.Count -gt 0) {
@@ -834,7 +839,7 @@ if ($DryRun) {
 # Step 7: Sentinel workspace discovery + Reader role
 Write-Step "7/8" "Discovering Sentinel / Log Analytics workspace and assigning Sentinel Reader"
 $LogAnalyticsWorkspaceKey = ""
-# Populated below (elseif branch, workspace ARM ID parse) when discovery
+# Populated below (workspace ARM ID parse, BUG-109) when discovery
 # succeeds -- declared here with Set-StrictMode-safe defaults since
 # Write-DeployConfig reads them even when that branch never runs (e.g.
 # Sentinel skipped, or ARM ID parse fails).
@@ -850,8 +855,8 @@ if ($SentinelWorkspaceId -eq "none") {
     Write-Info "Sentinel explicitly skipped (-SentinelWorkspaceId none)."
     $SentinelWorkspaceId = ""
 } elseif (-not $SentinelWorkspaceId) {
-    $workspaces = az monitor log-analytics workspace list `
-        --query "[].{name:name,rg:resourceGroup,customerId:customerId,id:id}" --output json | ConvertFrom-Json
+    $workspaces = @(az monitor log-analytics workspace list `
+        --query "[].{name:name,rg:resourceGroup,customerId:customerId,id:id}" --output json | ConvertFrom-Json | ForEach-Object { $_ })
     if (-not $workspaces -or $workspaces.Count -eq 0) {
         Write-Warning "No Log Analytics workspaces found. Sentinel queries will be unavailable; assign the Reader role manually later."
     } else {
@@ -868,6 +873,15 @@ if ($SentinelWorkspaceId) {
     if (-not (Get-Variable -Name workspaceArmId -Scope 0 -ErrorAction SilentlyContinue) -or -not $workspaceArmId) {
         $wsQuery        = "[?customerId=='$SentinelWorkspaceId'].id | [0]"
         $workspaceArmId = az monitor log-analytics workspace list --query $wsQuery --output tsv
+    }
+    # BUG-109: parse the resource group and workspace name here, once, right
+    # after the ARM ID is known (picked from the list or resolved from
+    # -SentinelWorkspaceId). The audit table/DCR block below and the shared-key
+    # step both need them; before this they were parsed only in the shared-key
+    # step, so the table call ran with an empty --workspace-name.
+    if ($workspaceArmId -and $workspaceArmId -match '/resourceGroups/([^/]+)/providers/Microsoft\.OperationalInsights/workspaces/([^/]+)$') {
+        $_laResourceGroup = $matches[1]
+        $_laWorkspaceName = $matches[2]
     }
     if (-not $workspaceArmId) {
         Write-Warning "Could not resolve workspace ARM ID for customerId '$SentinelWorkspaceId'. Assign the Sentinel Reader/Responder roles manually."
@@ -965,7 +979,8 @@ if ($SentinelWorkspaceId) {
 
     if ($DryRun) {
         Write-Info "DRY RUN: would ensure DCE '$DceName', table '$AuditTableName' with $($AuditColumnSpec.Count) columns, DCR '$DcrName' declaring the same $($AuditColumnSpec.Count), and 'Monitoring Metrics Publisher' on the DCR for the service principal. An existing table or DCR with fewer columns is UPGRADED, not skipped (BUG-033)."
-    } elseif (-not $workspaceArmId) {
+    } elseif (-not $workspaceArmId -or -not $_laResourceGroup -or -not $_laWorkspaceName) {
+        # BUG-109: no az call may run with an empty --workspace-name.
         Write-Warning "Skipping audit DCR provisioning -- workspace ARM ID could not be resolved."
     } else {
         Confirm-MonitorExtension
@@ -992,7 +1007,7 @@ if ($SentinelWorkspaceId) {
         # 2026-09-09 against law-sentinel; see Experiments/Local Run Triage --
         # 2026-09-08 Evening Batch in the project vault).
         if ($dce) {
-            $existingTable = az monitor log-analytics workspace table show --resource-group $ResourceGroup `
+            $existingTable = az monitor log-analytics workspace table show --resource-group $_laResourceGroup `
                 --workspace-name $_laWorkspaceName --name $AuditTableName 2>$null | ConvertFrom-Json
             if ($existingTable) {
                 # A tenant prepared before BUG-033 has the table but only the
@@ -1005,7 +1020,7 @@ if ($SentinelWorkspaceId) {
                     Write-Skip "Log Analytics table '$AuditTableName'"
                 } else {
                     Write-Info "Table '$AuditTableName' is missing $($missingCols.Count) column(s): $($missingCols -join ', ') -- updating"
-                    az monitor log-analytics workspace table update --resource-group $ResourceGroup `
+                    az monitor log-analytics workspace table update --resource-group $_laResourceGroup `
                         --workspace-name $_laWorkspaceName --name $AuditTableName `
                         --columns $AuditColumnArgs --output none
                     if ($LASTEXITCODE -ne 0) {
@@ -1015,7 +1030,7 @@ if ($SentinelWorkspaceId) {
                     }
                 }
             } else {
-                az monitor log-analytics workspace table create --resource-group $ResourceGroup `
+                az monitor log-analytics workspace table create --resource-group $_laResourceGroup `
                     --workspace-name $_laWorkspaceName --name $AuditTableName `
                     --columns $AuditColumnArgs `
                     --description "EasySOC internal investigation audit trail (agent-written, cost/token/duration metrics per case)" `
@@ -1128,9 +1143,8 @@ $AuditColumnJson
     # resource group + workspace name are parsed out of the ARM resource ID.
     if ($DryRun) {
         Write-Info "DRY RUN: would retrieve the workspace shared key for ACI container-log integration."
-    } elseif ($workspaceArmId -and $workspaceArmId -match '/resourceGroups/([^/]+)/providers/Microsoft\.OperationalInsights/workspaces/([^/]+)$') {
-        $_laResourceGroup = $matches[1]
-        $_laWorkspaceName = $matches[2]
+    } elseif ($_laResourceGroup -and $_laWorkspaceName) {
+        # Both were parsed from $workspaceArmId above (BUG-109).
         $LogAnalyticsWorkspaceKey = az monitor log-analytics workspace get-shared-keys `
             --resource-group $_laResourceGroup --workspace-name $_laWorkspaceName `
             --query "primarySharedKey" --output tsv
@@ -1165,9 +1179,9 @@ $_needsDiscovery = (-not $_llmBackendExplicit) -or
 if ($_needsDiscovery -and -not $NonInteractive) {
     $cog = $null
     try {
-        $cog = az cognitiveservices account list `
+        $cog = @(az cognitiveservices account list `
             --query "[?kind=='AIServices' || kind=='OpenAI'].{name:name,rg:resourceGroup,endpoint:properties.endpoint,kind:kind}" `
-            --output json 2>$null | ConvertFrom-Json
+            --output json 2>$null | ConvertFrom-Json | ForEach-Object { $_ })
     } catch {}
     if ($cog -and $cog.Count -gt 0) {
         $fr = Select-FromList -Items $cog -Label "Azure AI Foundry resource" -AllowNone `
