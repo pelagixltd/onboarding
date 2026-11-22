@@ -1316,6 +1316,28 @@ $resolvedConfigPath = Write-DeployConfig -IsDryRun:$DryRun `
     -SecretExpiry $SecretExpiry
 
 # ---------------------------------------------------------------------------
+# XDR advanced hunting table discovery (BL-087) -- real run only, after the config file exists.
+# Report for the partner, written into the config file; the agent does not read it. A failure
+# here does not fail the preparation.
+# ---------------------------------------------------------------------------
+if ($DryRun) {
+    Write-Info "XDR table discovery skipped (no app secret in dry run)"
+} elseif ($CaseBackend -eq "sentinel") {
+    Write-Info "XDR table discovery skipped (sentinel case backend: no ThreatHunting.Read.All permission requested)"
+} else {
+    $discoverScript = Join-Path $PSScriptRoot "Discover-XdrTables.ps1"
+    if (-not (Test-Path -LiteralPath $discoverScript)) {
+        Write-Warning "Discover-XdrTables.ps1 not found next to this script; run it later: .\Discover-XdrTables.ps1 -ConfigFile `"$resolvedConfigPath`""
+    } else {
+        Write-Step "XDR" "Checking which advanced hunting tables hold data"
+        & $discoverScript -ConfigFile $resolvedConfigPath
+        if ($LASTEXITCODE -ne 0) {
+            Write-Warning "XDR table discovery did not finish. Re-run it later: .\Discover-XdrTables.ps1 -ConfigFile `"$resolvedConfigPath`""
+        }
+    }
+}
+
+# ---------------------------------------------------------------------------
 # summary
 # ---------------------------------------------------------------------------
 $sep = "=" * 64
@@ -1357,6 +1379,7 @@ if ($DryRun) {
     Write-Host "  Next: send the agent the EasySOC deploy-aci.ps1, place it next to the config"
     Write-Host "        file above, and run:  .\deploy-aci.ps1"
 }
+Write-Host "  After onboarding a new data source or Defender add-on, re-run Discover-XdrTables.ps1 and restart the agent."
 Write-Host ""
 Write-Host $sep -ForegroundColor $bannerColor
 if ($DryRun) {
