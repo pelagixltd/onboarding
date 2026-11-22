@@ -314,7 +314,8 @@ $RequiredGraphPermissions.AddRange([string[]]@(
     "IdentityRiskEvent.Read.All",    # Entra risky sign-in events
     "AuditLog.Read.All",             # sign-in logs for identity analysis
     "User.Read.All",                 # user profile details for context resolver
-    "Directory.Read.All",            # group membership, role assignments, CA policies
+    "Directory.Read.All",            # group membership, role assignments
+    "Policy.Read.All",               # Conditional Access policies (entra_conditional_access)
     "GroupMember.Read.All"           # group membership resolution
 ))
 if ($CaseBackend -ne "sentinel") {
